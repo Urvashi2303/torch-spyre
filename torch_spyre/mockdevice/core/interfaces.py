@@ -43,8 +43,93 @@ class BaseGraphValidator(AbstractGraphValidator):
     VALID_ROLES = frozenset({"INPUT", "OUTPUT"})
 
     def validate(self, spec: MockOpSpec) -> None:
+        """
+        Validate MockOpSpec for structural correctness.
+        
+        Runs structural validation checks then device-specific validation.
+        Collects all errors and reports them together.
+        
+        Raises:
+            ValueError: If any validation check fails
+        """
         logger.stage("VALIDATE", f"Validating MockOpSpec '{spec.op_spec_name}'")
-        # Validation logic would go here - removed for flow-only version
+        errors: list[str] = []
+        
+        self._check_tensors(spec, errors)
+        self._check_compute_ops(spec, errors)
+        self._check_io_wiring(spec, errors)
+        self.validate_device_specifics(spec, errors)
+        
+        if errors:
+            msg = f"MockOpSpec validation failed with {len(errors)} error(s):\n"
+            for i, e in enumerate(errors, 1):
+                msg += f"  [{i}] {e}\n"
+            logger.error(msg.strip())
+            raise ValueError(msg.strip())
+        
+        logger.info(f"[FLOW] MockOpSpec '{spec.op_spec_name}' passed validation")
+
+    def _check_tensors(self, spec: MockOpSpec, errors: list) -> None:
+        """Check tensor roles and shapes."""
+        if not spec.tensors:
+            errors.append("No tensors found in MockOpSpec")
+            return
+        
+        for name, td in spec.tensors.items():
+            if not td.roles:
+                errors.append(f"Tensor '{name}': roles is empty")
+            else:
+                unknown = td.roles - self.VALID_ROLES
+                if unknown:
+                    errors.append(
+                        f"Tensor '{name}': unknown role(s) {unknown}. "
+                        f"Each role must be 'INPUT' or 'OUTPUT'."
+                    )
+            
+            if not td.shape:
+                errors.append(f"Tensor '{name}': shape is empty")
+            else:
+                if any(s <= 0 for s in td.shape):
+                    errors.append(
+                        f"Tensor '{name}': all shape dims must be > 0, got {td.shape}"
+                    )
+
+    def _check_compute_ops(self, spec: MockOpSpec, errors: list) -> None:
+        """Check compute operations have required fields."""
+        if not spec.compute_ops:
+            errors.append("No compute operations defined")
+            return
+        
+        for i, op in enumerate(spec.compute_ops):
+            if not op.op_func_name:
+                errors.append(f"compute_ops[{i}]: op_func_name is empty")
+            if not op.input_tensor_names:
+                errors.append(f"compute_ops[{i}] '{op.op_func_name}': no input tensors")
+            if not op.output_tensor_names:
+                errors.append(f"compute_ops[{i}] '{op.op_func_name}': no output tensors")
+
+    def _check_io_wiring(self, spec: MockOpSpec, errors: list) -> None:
+        """Check tensor references exist and at least one INPUT/OUTPUT present."""
+        known = set(spec.tensors)
+        
+        for i, op in enumerate(spec.compute_ops):
+            for ref in op.input_tensor_names + op.output_tensor_names:
+                tname = ref.split("-")[0]
+                if tname not in known:
+                    errors.append(
+                        f"compute_ops[{i}] '{op.op_func_name}': ref '{ref}' "
+                        f"resolves to '{tname}' which is not in tensors. "
+                        f"Known: {sorted(known)}"
+                    )
+        
+        all_roles: set[str] = set()
+        for td in spec.tensors.values():
+            all_roles |= td.roles
+        
+        if "INPUT" not in all_roles:
+            errors.append("No INPUT tensor found in MockOpSpec")
+        if "OUTPUT" not in all_roles:
+            errors.append("No OUTPUT tensor found in MockOpSpec")
 
     def validate_device_specifics(self, spec: MockOpSpec, errors: list) -> None:
         """Override to add backend-specific validation rules."""

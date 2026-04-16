@@ -48,8 +48,6 @@ class MockSpyreDevice(AbstractMockDevice):
             from ...core.serialization import OpSpecSerializer
             logger.info(f"[FLOW] Loading OpSpec artifact: {artifact_path.name}")
             return OpSpecSerializer.from_dict(data)
-        if isinstance(artifact, MockOpSpec):
-            return artifact
         if isinstance(artifact, dict):
             from ...core.serialization import OpSpecSerializer
             return OpSpecSerializer.from_dict(artifact)
