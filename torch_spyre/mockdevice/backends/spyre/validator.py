@@ -31,6 +31,14 @@ VALID_TORCH_DTYPES = frozenset({
     torch.bool,
 })
 
+# Stick sizes for different dtypes (elements per 128-byte stick)
+STICK_SIZES = {
+    torch.float16: 64,    # 128 bytes / 2 bytes per element = 64
+    torch.bfloat16: 64,   # 128 bytes / 2 bytes per element = 64
+    torch.float32: 32,    # 128 bytes / 4 bytes per element = 32
+    torch.int32: 32,      # 128 bytes / 4 bytes per element = 32
+}
+
 class MockOpSpecValidator(BaseGraphValidator):
     """
     Validates MockOpSpec for Spyre device.
@@ -43,6 +51,7 @@ class MockOpSpecValidator(BaseGraphValidator):
         logger.info("[FLOW] MockOpSpecValidator.validate_device_specifics() - Running Spyre-specific validation")
 
         self._check_tensor_dtypes(spec, errors)
+        self._check_stick_alignment(spec, errors)
         self._check_compute_op_semantics(spec, errors)
 
     def _check_tensor_dtypes(self, spec: MockOpSpec, errors: list[str]) -> None:
@@ -55,6 +64,57 @@ class MockOpSpecValidator(BaseGraphValidator):
 
             if td.dtype not in VALID_TORCH_DTYPES:
                 errors.append(f"Tensor '{name}': unsupported dtype {td.dtype}")
+
+    def _check_stick_alignment(self, spec: MockOpSpec, errors: list[str]) -> None:
+        """
+        Validate that tensor dimensions are aligned to stick boundaries.
+        
+        Spyre hardware stores data in 128-byte "sticks". The innermost dimension
+        of each tensor must be divisible by the stick size for that dtype:
+        - float16/bfloat16: 64 elements per stick (128 bytes / 2 bytes)
+        - float32/int32: 32 elements per stick (128 bytes / 4 bytes)
+        
+        Misaligned dimensions cause DMA failures when the hardware attempts to
+        transfer partial sticks.
+        """
+        for name, td in spec.tensors.items():
+            # Skip dtypes without stick size requirements
+            if td.dtype not in STICK_SIZES:
+                continue
+            
+            stick_size = STICK_SIZES[td.dtype]
+            
+            # Check device_size (hardware view) - this is what DMA uses
+            if td.device_size:
+                innermost_dim = td.device_size[-1]
+                if innermost_dim % stick_size != 0:
+                    # Calculate suggested aligned size
+                    aligned_size = ((innermost_dim // stick_size) + 1) * stick_size
+                    errors.append(
+                        f"Tensor '{name}': device innermost dimension {innermost_dim} "
+                        f"not aligned to stick size {stick_size} for dtype {td.dtype}. "
+                        f"This would cause failures on Spyre hardware. "
+                        f"Consider padding to {aligned_size}."
+                    )
+                    logger.error(
+                        f"[VALIDATION] Tensor '{name}' has misaligned dimension {innermost_dim}, "
+                        f"expected multiple of {stick_size}"
+                    )
+            
+            # Also check framework shape if device_size not available
+            elif td.shape:
+                innermost_dim = td.shape[-1]
+                if innermost_dim % stick_size != 0:
+                    aligned_size = ((innermost_dim // stick_size) + 1) * stick_size
+                    errors.append(
+                        f"Tensor '{name}': framework innermost dimension {innermost_dim} "
+                        f"not aligned to stick size {stick_size} for dtype {td.dtype}. "
+                        f"Consider padding to {aligned_size}."
+                    )
+                    logger.error(
+                        f"[VALIDATION] Tensor '{name}' has misaligned shape {innermost_dim}, "
+                        f"expected multiple of {stick_size}"
+                    )
 
     def _check_compute_op_semantics(self, spec: MockOpSpec, errors: list[str]) -> None:
         for i, op in enumerate(spec.compute_ops):
