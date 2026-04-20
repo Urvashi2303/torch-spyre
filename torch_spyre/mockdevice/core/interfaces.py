@@ -215,23 +215,23 @@ class MockOpDispatcher:
         Raises:
             AttributeError: If operation doesn't exist in torch.ops.aten
         """
-        print(f"  → _generic_cpu_dispatch() called")
+        print(f"   _generic_cpu_dispatch() called")
         print(f"     Operation: torch.ops.aten.{op_name}")
         print(f"     Inputs: {len(inputs)} tensors")
         print(f"     Attributes: {attributes}")
         
         # Step 1: Resolve the ATen operation
-        print(f"  → Step 1: Resolving torch.ops.aten.{op_name}...")
+        print(f"   Step 1: Resolving torch.ops.aten.{op_name}...")
         try:
             aten_op = getattr(torch.ops.aten, op_name)
-            print(f"     ✓ Operation found:", aten_op)
+            print(f"      Operation found:", aten_op)
         except AttributeError:
-            print(f"     ✗ Operation not found")
+            print(f"      Operation not found")
             logger.error(f"Operation 'torch.ops.aten.{op_name}' not found")
             raise
         
         # Step 2 & 3: Translate attributes and skip internal keys
-        print(f"  → Step 2: Filtering attributes...")
+        print(f"   Step 2: Filtering attributes...")
         translated_attrs = {}
         skipped_keys = []
         for key, value in attributes.items():
@@ -250,19 +250,19 @@ class MockOpDispatcher:
         
         # Step 4: Upcast inputs to precision dtype if specified
         if self._precision_dtype is not None:
-            print(f"  → Step 3: Upcasting to {self._precision_dtype}...")
+            print(f"   Step 3: Upcasting to {self._precision_dtype}...")
             inputs = [
                 inp.to(self._precision_dtype) if isinstance(inp, torch.Tensor) else inp
                 for inp in inputs
             ]
         
         # Execute the operation
-        print(f"  → Step 4: Executing torch.ops.aten.{op_name}()")
+        print(f"   Step 4: Executing torch.ops.aten.{op_name}()")
         print(f"     Input shapes: {[tuple(inp.shape) for inp in inputs]}")
         
         result = aten_op(*inputs, **translated_attrs)
         
-        print(f"     ✓ Execution successful")
+        print(f"      Execution successful")
         print(f"     Output shape: {tuple(result.shape) if hasattr(result, 'shape') else 'N/A'}")
         
         # Step 5: Normalize tuple returns to list
@@ -345,19 +345,19 @@ class MockOpDispatcher:
             
             if custom_impl is not None:
                 # Use custom implementation
-                print(f"[TIER 1] ✓ Found custom implementation for '{compute_op.op_func_name}'")
+                print(f"[TIER 1]  Found custom implementation for '{compute_op.op_func_name}'")
                 print(f"[TIER 1] Executing custom implementation...")
                 
                 try:
                     outputs = custom_impl(inputs, compute_op, self.verbose)
-                    print(f"[TIER 1] ✓ Custom implementation succeeded")
+                    print(f"[TIER 1]  Custom implementation succeeded")
                 except Exception as e:
                     logger.error(f"Custom implementation failed for '{compute_op.op_func_name}': {e}")
                     raise
             
             else:
                 # TIER 2: Try generic ATen operation
-                print(f"[TIER 1] ✗ Not found in custom registry")
+                print(f"[TIER 1]  Not found in custom registry")
                 print(f"[TIER 2] Trying generic ATen fallback: torch.ops.aten.{compute_op.op_func_name}")
                 
                 try:
@@ -366,11 +366,11 @@ class MockOpDispatcher:
                         inputs,
                         compute_op.attributes
                     )
-                    print(f"[TIER 2] ✓ Generic ATen operation succeeded")
+                    print(f"[TIER 2]  Generic ATen operation succeeded")
                 except AttributeError as e:
                     # TIER 3: Operation doesn't exist anywhere
-                    print(f"[TIER 2] ✗ Operation not found in torch.ops.aten")
-                    print(f"[TIER 3] ✗ FAILED - Operation '{compute_op.op_func_name}' not implemented anywhere")
+                    print(f"[TIER 2]  Operation not found in torch.ops.aten")
+                    print(f"[TIER 3]  FAILED - Operation '{compute_op.op_func_name}' not implemented anywhere")
                     logger.error(f"Operation '{compute_op.op_func_name}' not found in registry or torch.ops.aten")
                     raise NotImplementedError(
                         f"Operation '{compute_op.op_func_name}' is not implemented. "
@@ -419,7 +419,7 @@ class MockOpDispatcher:
 
 class AbstractMockDevice(ABC):
     """
-    MockSpyreDevice: Top-level device class. Chains Parser → Validator → Dispatcher
+    MockSpyreDevice: Top-level device class. Chains Parser  Validator  Dispatcher
     in a submit() method. Matches real SpyreDevice interface.
     """
 
