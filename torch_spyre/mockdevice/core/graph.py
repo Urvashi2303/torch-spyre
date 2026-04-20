@@ -24,11 +24,11 @@ class TensorDescriptor:
     name:        str                # the tensor identifier used to reference this tensor elsewhere in the graph.
     roles:       set[str]           # a set of role labels such as {"INPUT"}, {"OUTPUT"}, or both. This is later used by is_input(), is_output(), and is_inplace().
     shape:       list[int]          # the logical tensor dimensions, similar to PyTorch tensor sizes.
-    stride:      list[int]          # the logical memory stride for each dimension, describing how elements are laid out in memory.
     dtype:       torch.dtype        # the PyTorch data type, such as torch.float16.
-    device_size: list[int]          # device-specific layout dimensions. This may differ from logical shape because hardware may store tensors in blocked or transformed layouts.
-    dim_map:     list[int]          # maps logical dimensions to device dimensions. This helps interpret how the tensor’s shape is rearranged for the device.
-    device_dtype: str               # the device/backend-specific type string, separate from PyTorch’s dtype.
+    stride:      list[int]          # the logical memory stride for each dimension, describing how elements are laid out in memory.
+    device_size: list[int]          # Hardware memory layout dimensions, e.g., [16, 128, 16] for a 3D tensor.
+    device_dtype: str               # Hardware data format (SEN169 = spyre's internal format)
+    dim_map:     list[int]          # Hardware dimension mapping
     
     metadata:    dict[str, Any] = field(default_factory=dict)  # an extensible dictionary for extra per-tensor information that does not belong in the core schema.
     

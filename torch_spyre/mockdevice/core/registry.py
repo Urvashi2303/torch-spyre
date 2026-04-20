@@ -57,7 +57,7 @@ class OpRegistry:
         logger.debug(f"[FLOW] Preparing to register op: {op_name}")
         def _decorator(fn: Callable) -> Callable:
             self._fns[op_name] = fn  # Store the function in our dictionary
-            logger.info(f"[FLOW] ✓ Registered custom operation: '{op_name}' for {self._device_name}")
+            logger.info(f"[FLOW]  Registered custom operation: '{op_name}' for {self._device_name}")
             return fn
         return _decorator
 

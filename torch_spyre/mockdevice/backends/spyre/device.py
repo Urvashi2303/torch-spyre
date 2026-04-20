@@ -41,16 +41,36 @@ class MockSpyreDevice(AbstractMockDevice):
 
     def _load_artifact(self, artifact):
         """Load OpSpec JSON artifact (mock_op_specs.json format only)."""
+        # If already a MockOpSpec, return as-is
+        if isinstance(artifact, MockOpSpec):
+            logger.info(f"[FLOW] Using provided MockOpSpec: {artifact.op_spec_name}")
+            return artifact
+        
+        # Load from file or directory path
         if isinstance(artifact, str):
             artifact_path = Path(artifact)
-            with open(artifact) as f:
+            
+            # If it's a directory, look for mock_op_specs.json inside
+            if artifact_path.is_dir():
+                json_path = artifact_path / "mock_op_specs.json"
+                print(f" Loading OpSpec from path: json_path: {json_path}")
+                if not json_path.exists():
+                    logger.error(f"[FLOW] mock_op_specs.json not found in {artifact_path}")
+                    raise FileNotFoundError(f"mock_op_specs.json not found in {artifact_path}")
+                artifact_path = json_path
+            
+            # Load the JSON file
+            with open(artifact_path) as f:
                 data = json.load(f)
             from ...core.serialization import OpSpecSerializer
             logger.info(f"[FLOW] Loading OpSpec artifact: {artifact_path.name}")
             return OpSpecSerializer.from_dict(data)
+        
+        # Parse from dict
         if isinstance(artifact, dict):
             from ...core.serialization import OpSpecSerializer
             return OpSpecSerializer.from_dict(artifact)
+        
         logger.error(f"[FLOW] Invalid artifact type: {type(artifact).__name__}")
         raise TypeError(f"artifact must be a file path (str), parsed dict, or MockOpSpec")
 

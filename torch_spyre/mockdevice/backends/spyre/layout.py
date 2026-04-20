@@ -23,6 +23,4 @@ class SpyreStickLayout(AbstractLayoutTransformer):
     def from_contiguous(self, tensor: torch.Tensor, td: TensorDescriptor) -> torch.Tensor:
         """No-op: no physical HBM to write to in mock mode."""
         logger.info(f"[FLOW] SpyreStickLayout.from_contiguous() for tensor '{td.name}' (no-op in mock)")
-        return tensor.contiguous()
-
-
+        return tensor

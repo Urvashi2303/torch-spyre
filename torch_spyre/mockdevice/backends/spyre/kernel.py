@@ -43,6 +43,7 @@ class SpyreSDSCMockKernelRunner:
         logger.info(f"[FLOW] MockSpyreDevice runner is initialized")
         
         # Process each operation (matching hardware runner behavior)
+        final_outputs = None
         for i in range(len(self.code_dirs)):
             code_dir: str = self.code_dirs[i]
             arg_mapping = self.arg_mappings[i]
@@ -52,21 +53,36 @@ class SpyreSDSCMockKernelRunner:
                 tensor_name = f"Tensor{j}"
                 input_tensors[tensor_name] = args[idx].to("cpu")
             
-            # Load mock_op_specs.json (OpSpec format only)
-            mock_specs_json = os.path.join(code_dir, "mock_op_specs.json")
-            
-            if not os.path.exists(mock_specs_json):
-                logger.error(f"[FLOW] mock_op_specs.json not found in {code_dir}")
-                raise FileNotFoundError(f"mock_op_specs.json not found in {code_dir}")
-            
+            # Pass code_dir directly - device will look for mock_op_specs.json
             outputs, used_inputs, graph = self.device.submit(
-                mock_specs_json,
+                code_dir,
                 input_tensors,
             )
+            
+            # Update args in-place with outputs to enable operation chaining
+            # This allows subsequent operations to use outputs from previous operations
+            output_names = [
+                name for name, td in graph.tensors.items()
+                if td.is_output()
+            ]
+            
+            # Map output tensors back to their corresponding args indices
+            for j, idx in enumerate(arg_mapping):
+                tensor_name = f"Tensor{j}"
+                if tensor_name in outputs and tensor_name in output_names:
+                    # Copy output back to the original args buffer in-place
+                    out_tensor = outputs[tensor_name]
+                    if args[idx].dtype != out_tensor.dtype:
+                        out_tensor = out_tensor.to(args[idx].dtype)
+                    args[idx].copy_(out_tensor)
+                    logger.debug(f"[FLOW] Updated args[{idx}] with output {tensor_name}")
+            
+            final_outputs = outputs  # Keep last operation's outputs
         
         self.device.synchronize()
         self.device.shutdown()
         
         logger.stage("KERNEL_COMPLETE", f"Kernel '{self.kernel_name}' complete")
-
-
+        
+        # Return output tensors as a list (matching hardware runner behavior)
+        return list(final_outputs.values()) if final_outputs else []
