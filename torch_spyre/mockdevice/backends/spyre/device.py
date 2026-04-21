@@ -40,7 +40,11 @@ class MockSpyreDevice(AbstractMockDevice):
         )
 
     def _load_artifact(self, artifact):
-        """Load OpSpec JSON artifact (mock_op_specs.json format only)."""
+        """
+        Load SDSC JSON artifact for mock device validation.
+        
+        Looks for sdsc_*.json files in the provided directory.
+        """
         # If already a MockOpSpec, return as-is
         if isinstance(artifact, MockOpSpec):
             logger.info(f"[FLOW] Using provided MockOpSpec: {artifact.op_spec_name}")
@@ -50,26 +54,29 @@ class MockSpyreDevice(AbstractMockDevice):
         if isinstance(artifact, str):
             artifact_path = Path(artifact)
             
-            # If it's a directory, look for mock_op_specs.json inside
+            # If it's a directory, look for sdsc_*.json files
             if artifact_path.is_dir():
-                json_path = artifact_path / "mock_op_specs.json"
-                print(f" Loading OpSpec from path: json_path: {json_path}")
-                if not json_path.exists():
-                    logger.error(f"[FLOW] mock_op_specs.json not found in {artifact_path}")
-                    raise FileNotFoundError(f"mock_op_specs.json not found in {artifact_path}")
+                sdsc_files = list(artifact_path.glob("sdsc_*.json"))
+                if not sdsc_files:
+                    logger.error(f"[FLOW] No SDSC JSON files (sdsc_*.json) found in {artifact_path}")
+                    raise FileNotFoundError(f"No SDSC JSON files (sdsc_*.json) found in {artifact_path}")
+                
+                # Use the first SDSC file (typically sdsc_0.json)
+                json_path = sorted(sdsc_files)[0]
+                logger.info(f"[FLOW] Found SDSC JSON: {json_path.name}")
                 artifact_path = json_path
             
-            # Load the JSON file
+            # Load the SDSC JSON file
             with open(artifact_path) as f:
                 data = json.load(f)
-            from ...core.serialization import OpSpecSerializer
-            logger.info(f"[FLOW] Loading OpSpec artifact: {artifact_path.name}")
-            return OpSpecSerializer.from_dict(data)
+            from ...core.serialization import SDSCSerializer
+            logger.info(f"[FLOW] Loading SDSC artifact: {artifact_path.name}")
+            return SDSCSerializer.from_dict(data)
         
-        # Parse from dict
+        # Parse from dict (SDSC format)
         if isinstance(artifact, dict):
-            from ...core.serialization import OpSpecSerializer
-            return OpSpecSerializer.from_dict(artifact)
+            from ...core.serialization import SDSCSerializer
+            return SDSCSerializer.from_dict(artifact)
         
         logger.error(f"[FLOW] Invalid artifact type: {type(artifact).__name__}")
         raise TypeError(f"artifact must be a file path (str), parsed dict, or MockOpSpec")

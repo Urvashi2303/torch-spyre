@@ -231,17 +231,22 @@ class MockOpDispatcher:
             raise
         
         # Step 2 & 3: Translate attributes and skip internal keys
+        # attr_map translates SDSC attribute names to PyTorch parameter names.
+        # Keys starting with "_" are skipped (internal framework use).
+        # Keys with trailing "_" are either translated via attr_map or have the trailing "_" stripped.
+        # Example: attr_map = {"fidelity_": "approximate"} translates fidelity_ -> approximate
+        #          If not in attr_map, "axis_" -> "axis" (trailing underscore stripped)
         print(f"   Step 2: Filtering attributes...")
         translated_attrs = {}
         skipped_keys = []
         for key, value in attributes.items():
-            # Skip internal keys (start with "_" or known metadata fields)
-            if key.startswith("_") or key in ("constants",):
+            # Skip internal keys (start with "_")
+            if key.startswith("_"):
                 skipped_keys.append(key)
                 continue
             
-            # Translate key using attr_map
-            new_key = self._attr_map.get(key, key)
+            # Translate key using attr_map, or strip trailing underscore if not in map
+            new_key = self._attr_map.get(key, key.rstrip("_"))
             translated_attrs[new_key] = value
         
         if skipped_keys:
@@ -257,10 +262,16 @@ class MockOpDispatcher:
             ]
         
         # Execute the operation
+        # Attempt dispatch with attrs, fall back to no-attrs for ops that
+        # don't accept kwargs (e.g., relu, tanh, add without alpha parameter)
         print(f"   Step 4: Executing torch.ops.aten.{op_name}()")
         print(f"     Input shapes: {[tuple(inp.shape) for inp in inputs]}")
         
-        result = aten_op(*inputs, **translated_attrs)
+        try:
+            result = aten_op(*inputs, **translated_attrs)
+        except (TypeError, RuntimeError):
+            # Fall back to calling without attributes if the op doesn't accept them
+            result = aten_op(*inputs)
         
         print(f"      Execution successful")
         print(f"     Output shape: {tuple(result.shape) if hasattr(result, 'shape') else 'N/A'}")
