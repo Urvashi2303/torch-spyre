@@ -185,11 +185,18 @@ def run_codegen():
         cmd in sys.argv for cmd in ["dist_info", "egg_info", "install_egg_info"]
     )
 
-    if not importlib.util.find_spec("sendnn"):
+    # Skip sendnn check if using stubs
+    if not USE_STUBS and not importlib.util.find_spec("sendnn"):
         if not is_meta:
-            raise ImportError("sendnn is required for building. Install it first.")
+            raise ImportError(
+                "sendnn is required for building. Install it first, or use USE_STUBS=1 to build without it."
+            )
 
         print("Skipping codegen (sendnn not available, metadata extraction only)")
+        return None
+
+    if USE_STUBS:
+        print("Skipping codegen (using stubs, sendnn not required)")
         return None
 
     gen_script = CODEGEN_DIR / "gen.py"
