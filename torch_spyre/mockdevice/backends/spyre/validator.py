@@ -15,6 +15,7 @@ logger = get_logger("MockOpSpecValidator")
 
 KNOWN_OP_FUNCS = frozenset({
     "add",
+    "mul",
     "gelu",
     "maxnonstick",
     "realdiv",
