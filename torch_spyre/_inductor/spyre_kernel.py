@@ -20,7 +20,13 @@ import math
 import torch
 import sympy
 
-from torch_spyre._C import DataFormats
+try:
+    from torch_spyre._C import DataFormats
+except (ImportError, ModuleNotFoundError):
+    # Stub DataFormats when _C is not available
+    class DataFormats:
+        """Stub DataFormats class for when _C module is not available"""
+        pass
 
 from torch._inductor.codegen.common import (
     CSEVariable,

@@ -58,15 +58,21 @@ class SpyreAsyncCompile:
         kernel_output_dir = get_output_dir(kernel_name)
         
         # Check if mock mode is enabled via environment variable
-        mock_enabled = os.getenv("MOCK_SPYRE", "0") == "1"
+        # Support both MOCK_SPYRE and TORCH_SPYRE_MOCK_DEVICE for compatibility
+        mock_enabled = (os.getenv("MOCK_SPYRE", "0") == "1" or
+                       os.getenv("TORCH_SPYRE_MOCK_DEVICE", "0") == "1")
         
         if _SDSC_BUNDLE:
             for idx, sdsc_json in enumerate(sdscs_json):
-                with open(
-                    os.path.join(kernel_output_dir, f"sdsc_{idx}.json"), "w"
-                ) as file:
+                sdsc_path = os.path.join(kernel_output_dir, f"sdsc_{idx}.json")
+                with open(sdsc_path, "w") as file:
                     logger.info(f"Generating {file.name}")
                     json.dump(sdsc_json, file, indent=2)
+                
+                # Print SDSC path
+                if mock_enabled:
+                    print(f"📄 SDSC JSON {idx}: {sdsc_path}")
+            
             with open(os.path.join(kernel_output_dir, "bundle.mlir"), "w") as file:
                 logger.info(f"Generating {file.name}")
                 file.write("module {\n")
@@ -101,13 +107,19 @@ class SpyreAsyncCompile:
         else:
             # Process each SuperDSC separately
             sdsc_dirs = []
-            for sdsc_json in sdscs_json:
+            for idx, sdsc_json in enumerate(sdscs_json):
                 kernel_output_dir = get_output_dir(kernel_name)
                 subdir = os.path.join(kernel_output_dir, "execute", kernel_name)
                 os.makedirs(subdir, exist_ok=True)
-                with open(os.path.join(subdir, "sdsc.json"), "w") as file:
+                sdsc_path = os.path.join(subdir, "sdsc.json")
+                with open(sdsc_path, "w") as file:
                     logger.info(f"Generating {file.name}")
                     json.dump(sdsc_json, file, indent=2)
+                
+                # Print SDSC path
+                if mock_enabled:
+                    print(f"📄 SDSC JSON {idx}: {sdsc_path}")
+                
                 sdsc_dirs.append(kernel_output_dir)
 
             if mock_enabled:
