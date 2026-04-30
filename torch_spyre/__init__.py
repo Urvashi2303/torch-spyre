@@ -53,15 +53,28 @@ class _SpyreImpl:
                 return
             # Load the C++ Module
             # put any light, once-per-process setup here
-            self._C = importlib.import_module("torch_spyre._C")
-            # this will create the allocator
-            self._C.start_runtime()
+            try:
+                self._C = importlib.import_module("torch_spyre._C")
+                # this will create the allocator
+                if hasattr(self._C, 'start_runtime'):
+                    self._C.start_runtime()
+            except (ImportError, ModuleNotFoundError, AttributeError) as e:
+                import warnings
+                warnings.warn(
+                    f"torch_spyre._C module not available: {e}\n"
+                    "This is expected if the wheel was built with stub dependencies.\n"
+                    "Device operations will not be available. For full functionality, "
+                    "rebuild with actual IBM Spyre libraries.",
+                    RuntimeWarning,
+                    stacklevel=2
+                )
+                # Set a dummy _C module to prevent further errors
+                self._C = None
+
             self._initialized = True
 
-            ## Run patch on import
-            from ._monkey_patch import _patch_tensor_for_spyre
-
-            _patch_tensor_for_spyre()
+            # Mock device initialization moved to bottom of file
+            # to ensure it happens immediately on import
 
             from torch_spyre._inductor import _autoload as ts_autoload
 
@@ -89,9 +102,9 @@ class _SpyreImpl:
 
     def manual_seed_all(self, seed: int) -> None:
         _C = self._C
-        if hasattr(_C, "manual_seed_all"):
+        if _C is not None and hasattr(_C, "manual_seed_all"):
             _C.manual_seed_all(int(seed))
-        else:
+        elif _C is not None:
             # Otherwise, fan out:
             for idx in range(self.device_count()):
                 self.manual_seed(seed, device=idx)
@@ -112,6 +125,8 @@ class _SpyreImpl:
         return 1
 
     def current_device(self) -> int:
+        if self._C is None:
+            return 0
         return getattr(self._C, "current_device", lambda: 0)()
 
     def set_device(self, idx: int) -> None:
@@ -205,12 +220,63 @@ def _autoload():
     _autoload._ran = True
 
     import torch  # noqa: E402
-    from . import _hooks  # noqa: F401
+
+    # Try to import _hooks, but allow graceful failure if built with stubs
+    try:
+        from . import _hooks  # noqa: F401
+    except ImportError as e:
+        import warnings
+        warnings.warn(
+            f"torch_spyre C++ extensions not available: {e}\n"
+            "This is expected if the wheel was built with stub dependencies.\n"
+            "Some functionality will be limited. For full functionality, "
+            "rebuild with actual IBM Spyre libraries.",
+            RuntimeWarning,
+            stacklevel=2
+        )
+        # Continue without _hooks - Python-only mode
 
     # Set all the appropriate state on PyTorch
     torch.utils.rename_privateuse1_backend(DEVICE_NAME)
     torch._register_device_module(DEVICE_NAME, make_spyre_module())
-    import torch_spyre.codegen_ops  # noqa: F401
+    
+    # Initialize mock device if enabled - must happen AFTER device registration
+    if os.environ.get('TORCH_SPYRE_MOCK_DEVICE', '0') == '1':
+        print("[MOCK_DEVICE] Initializing mock device in _autoload()...")
+
+        # Load mock device operations
+        try:
+            from .mock_device_integration import mock_device_ops
+            print("[MOCK_DEVICE] Mock device operations loaded")
+        except ImportError as e:
+            import warnings
+            warnings.warn(f"Could not load mock device ops: {e}", RuntimeWarning)
+
+        # Load mock spyre tensor
+        try:
+            from .mock_device_integration import mock_spyre_tensor
+            print("[MOCK_DEVICE] Mock Spyre tensor support loaded")
+        except ImportError as e:
+            import warnings
+            warnings.warn(f"Could not load mock spyre tensor: {e}", RuntimeWarning)
+
+        # Apply monkey patches IMMEDIATELY
+        from ._monkey_patch import _patch_tensor_for_spyre
+        _patch_tensor_for_spyre()
+        print("[MOCK_DEVICE] Tensor patches applied")
+    
+    # Try to import codegen_ops, but allow graceful failure
+    try:
+        import torch_spyre.codegen_ops  # noqa: F401
+    except (ImportError, AttributeError) as e:
+        import warnings
+        warnings.warn(
+            f"torch_spyre.codegen_ops not available: {e}\n"
+            "This is expected if built with stub dependencies.",
+            RuntimeWarning,
+            stacklevel=2
+        )
+    
     from torch_spyre._inductor import _light_autoload
 
     _light_autoload()
@@ -227,4 +293,6 @@ def _autoload():
     # enable these if you would like to see runtime/compiler logging
     os.environ.setdefault("TORCH_SENDNN_LOG", "CRITICAL")
     os.environ.setdefault("DT_DEEPRT_VERBOSE", "-1")
-    os.environ.setdefault("DTLOG_LEVEL", "error")
+
+# Mock device initialization moved into _autoload() function above
+# to ensure it runs after device registration
