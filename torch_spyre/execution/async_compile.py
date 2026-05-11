@@ -18,6 +18,7 @@ from typing import Any
 import os
 import subprocess
 
+from torch._inductor.async_compile import AsyncCompile
 from torch._inductor.runtime.runtime_utils import cache_dir
 from torch_spyre._C import convert_artifacts
 from torch_spyre._inductor.codegen.superdsc import compile_op_spec
@@ -39,7 +40,7 @@ def get_output_dir(kernel_name: str):
 
 class SpyreAsyncCompile:
     def __init__(self) -> None:
-        pass
+        self._cpu_async_compile = AsyncCompile() if os.getenv("TORCH_SPYRE_MOCK_DEVICE", "0") == "1" else None
 
     def sdsc(self, kernel_name: str, specs: list[OpSpec | UnimplementedOp]):
         # 1. Generate SDSC.json for each OpSpec
@@ -135,5 +136,13 @@ class SpyreAsyncCompile:
 
                 return SpyreSDSCKernelRunner(kernel_name, sdsc_dirs, arg_mappings)
 
+    def cpp_pybinding(self, argtypes: list[str], source_code: str):
+        if self._cpu_async_compile is None:
+            raise AttributeError("cpp_pybinding is only available in TORCH_SPYRE_MOCK_DEVICE=1 mode")
+        return self._cpu_async_compile.cpp_pybinding(argtypes, source_code)
+
     def wait(self, scope: dict[str, Any]) -> None:
-        pass
+        if self._cpu_async_compile is not None:
+            cpu_wait = getattr(self._cpu_async_compile, "wait", None)
+            if callable(cpu_wait):
+                cpu_wait(scope)

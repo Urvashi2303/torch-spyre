@@ -74,5 +74,3 @@ echo "No C++ extensions are compiled. The mock device enables:"
 echo "  - PyTorch Inductor integration"
 echo "  - SDSC JSON generation"
 echo "  - CPU-based execution for testing"
-
-# Made with Bob

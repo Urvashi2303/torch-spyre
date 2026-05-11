@@ -11,6 +11,11 @@ import os
 import json
 from typing import Any, Dict, List
 
+try:
+    from backends.spyre.torch_patches import install_mock_torch_patches
+except Exception:
+    install_mock_torch_patches = None
+
 MOCK_DEVICE_ENABLED = os.environ.get('TORCH_SPYRE_MOCK_DEVICE', '0') == '1'
 
 # Global storage for tracking operations
@@ -119,6 +124,9 @@ def install_mock_device_hooks():
         return
     
     print("[MOCK_DEVICE] Installing device operation hooks")
+    
+    if install_mock_torch_patches is not None:
+        install_mock_torch_patches()
     
     # We'll patch torch.Tensor.to to intercept device transfers
     # This is a simplified approach - full implementation would need more hooks

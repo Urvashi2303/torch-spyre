@@ -16,8 +16,24 @@ without actual hardware.
 
 import torch
 import os
+import types
 
 MOCK_DEVICE_ENABLED = os.environ.get('TORCH_SPYRE_MOCK_DEVICE', '0') == '1'
+MOCK_VERBOSE = os.environ.get("TORCH_SPYRE_MOCK_VERBOSE", "0") == "1"
+
+
+def _mock_print(*args, **kwargs):
+    if MOCK_DEVICE_ENABLED and MOCK_VERBOSE:
+        print(*args, **kwargs)
+
+def _mock_has_debug_enabled():
+    return MOCK_DEVICE_ENABLED and (
+        MOCK_VERBOSE or os.environ.get("TORCH_SPYRE_MOCK_DEBUG_VIEW", "0") == "1"
+    )
+
+def _mock_debug_print(*args, **kwargs):
+    if _mock_has_debug_enabled():
+        print(*args, **kwargs)
 
 
 class MockSpyreTensor(torch.Tensor):
@@ -43,7 +59,13 @@ class MockSpyreTensor(torch.Tensor):
         super().__init__()
         self._mock_device = torch.device("spyre", 0)
         if MOCK_DEVICE_ENABLED:
-            print(f"[MOCK_DEVICE] Created MockSpyreTensor: shape={self.shape}, dtype={self.dtype}")
+            try:
+                cpu_data = data.cpu() if isinstance(data, torch.Tensor) else torch.tensor(data)
+                _mock_print(
+                    f"[MOCK_DEVICE] Created MockSpyreTensor: shape={tuple(cpu_data.shape)}, dtype={cpu_data.dtype}"
+                )
+            except Exception:
+                _mock_print("[MOCK_DEVICE] Created MockSpyreTensor")
     
     @property
     def device(self):
@@ -52,6 +74,33 @@ class MockSpyreTensor(torch.Tensor):
         if not hasattr(self, '_mock_device'):
             self._mock_device = torch.device("spyre", 0)
         return self._mock_device
+
+    @property
+    def shape(self):
+        logical_shape = getattr(self, "_mock_logical_shape", None)
+        if logical_shape is not None:
+            return torch.Size(logical_shape)
+        return super().shape
+
+    def size(self, *args):
+        shape = self.shape
+        if args:
+            return shape[args[0]]
+        return shape
+
+    def stride(self, dim=None):
+        logical_stride = getattr(self, "_mock_logical_stride", None)
+        if logical_stride is None:
+            return super().stride() if dim is None else super().stride(dim)
+        if dim is None:
+            return logical_stride
+        return logical_stride[dim]
+
+    def storage_offset(self):
+        logical_offset = getattr(self, "_mock_storage_offset", None)
+        if logical_offset is not None:
+            return logical_offset
+        return super().storage_offset()
     
     def device_tensor_layout(self):
         """
@@ -59,38 +108,28 @@ class MockSpyreTensor(torch.Tensor):
         This is required by Spyre inductor backend.
         """
         if MOCK_DEVICE_ENABLED:
-            print(f"[MOCK_DEVICE] device_tensor_layout() called for tensor shape={self.shape}")
+            _mock_print(f"[MOCK_DEVICE] device_tensor_layout() called for tensor shape={self.shape}")
         
+        existing_layout = getattr(self, "_mock_device_layout", None)
+        if existing_layout is not None:
+            if MOCK_DEVICE_ENABLED:
+                _mock_print("[MOCK_DEVICE] Returning preserved mock device layout")
+            return existing_layout
+
         # Import here to avoid circular dependency
         try:
-            from torch_spyre._C import SpyreTensorLayout, DataFormats, get_device_dtype
+            from torch_spyre._C import SpyreTensorLayout
             
-            # Create layout with tensor's actual dimensions
-            device_size = tuple(self.shape)
-            
-            # Create simple dim_map and stride_map based on tensor layout
-            dim_map = {i: i for i in range(len(self.shape))}
-            stride_map = {i: int(s) for i, s in enumerate(self.stride())}
-            
-            # Get appropriate data format for dtype
-            try:
-                data_format = get_device_dtype(self.dtype)
-            except:
-                data_format = DataFormats.IEEE_FP32
-            
-            layout = SpyreTensorLayout(
-                device_size=device_size,
-                dim_map=dim_map,
-                stride_map=stride_map,
-                data_format=data_format
-            )
+            # Use the 2-arg constructor which automatically calculates
+            # stick-aware stride_map matching real Spyre behavior
+            layout = SpyreTensorLayout(list(self.shape), self.dtype)
             
             if MOCK_DEVICE_ENABLED:
-                print(f"[MOCK_DEVICE] Created SpyreTensorLayout: device_size={device_size}")
+                _mock_print(f"[MOCK_DEVICE] Created SpyreTensorLayout: device_size={tuple(self.shape)}")
             return layout
         except Exception as e:
             if MOCK_DEVICE_ENABLED:
-                print(f"[MOCK_DEVICE] Warning: Could not create SpyreTensorLayout: {e}")
+                _mock_print(f"[MOCK_DEVICE] Warning: Could not create SpyreTensorLayout: {e}")
                 import traceback
                 traceback.print_exc()
             # Return a mock object that has the basic attributes
@@ -122,23 +161,268 @@ class MockSpyreTensor(torch.Tensor):
         # If target is spyre, we're already there
         if device and 'spyre' in str(device):
             if MOCK_DEVICE_ENABLED:
-                print(f"[MOCK_DEVICE] Tensor already on spyre device")
+                _mock_print(f"[MOCK_DEVICE] Tensor already on spyre device")
             return self
         
         # Otherwise, convert back to regular tensor and transfer
         if MOCK_DEVICE_ENABLED:
-            print(f"[MOCK_DEVICE] Converting MockSpyreTensor to regular tensor for device: {device}")
+            _mock_print(f"[MOCK_DEVICE] Converting MockSpyreTensor to regular tensor for device: {device}")
         regular_tensor = torch.Tensor._make_subclass(torch.Tensor, self)
+        # Preserve dtype if not explicitly specified in the to() call
+        if dtype is None and regular_tensor.dtype != self.dtype:
+            regular_tensor = regular_tensor.to(dtype=self.dtype)
         return regular_tensor.to(*args, **kwargs)
     
     def cpu(self):
-        """Return as regular CPU tensor"""
+        """Return as regular CPU tensor, preserving dtype and logical view metadata"""
         if MOCK_DEVICE_ENABLED:
-            print(f"[MOCK_DEVICE] Converting MockSpyreTensor to CPU tensor")
-        return torch.Tensor._make_subclass(torch.Tensor, self)
+            _mock_print(f"[MOCK_DEVICE] Converting MockSpyreTensor to CPU tensor")
+        regular_tensor = torch.Tensor._make_subclass(torch.Tensor, self)
+        logical_shape = getattr(self, "_mock_logical_shape", None)
+        logical_stride = getattr(self, "_mock_logical_stride", None)
+        logical_offset = getattr(self, "_mock_storage_offset", None)
+
+        if (
+            logical_shape is not None
+            or logical_stride is not None
+            or logical_offset is not None
+        ):
+            _mock_debug_print(
+                "[MOCK_DEVICE] cpu() logical metadata "
+                f"shape={logical_shape} stride={logical_stride} offset={logical_offset} "
+                f"base_shape={tuple(regular_tensor.shape)} "
+                f"base_stride={tuple(torch.Tensor.stride(regular_tensor))}"
+            )
+
+        if (
+            logical_shape is not None
+            or logical_stride is not None
+            or logical_offset is not None
+        ):
+            base = regular_tensor
+            if logical_offset is None:
+                logical_offset = base.storage_offset()
+            if logical_shape is None:
+                logical_shape = tuple(base.shape)
+            if logical_stride is None:
+                logical_stride = tuple(base.stride())
+            regular_tensor = torch.as_strided(
+                base, size=logical_shape, stride=logical_stride, storage_offset=logical_offset
+            )
+
+        return regular_tensor
     
     def __repr__(self):
         return f"MockSpyreTensor({super().__repr__()}, device='{self.device}')"
+
+    @classmethod
+    def __torch_function__(cls, func, types_, args=(), kwargs=None):
+        kwargs = kwargs or {}
+
+        def _unwrap(x):
+            if isinstance(x, MockSpyreTensor):
+                return x.cpu()
+            if isinstance(x, (tuple, list)):
+                return type(x)(_unwrap(v) for v in x)
+            if isinstance(x, dict):
+                return {k: _unwrap(v) for k, v in x.items()}
+            return x
+
+        def _rewrap(x):
+            if isinstance(x, MockSpyreTensor):
+                return x
+            if isinstance(x, torch.Tensor):
+                try:
+                    wrapped = MockSpyreTensor(x)
+                except RuntimeError as e:
+                    msg = str(e)
+                    if (
+                        "already associated to a python object of type FakeTensor" in msg
+                        or "Creating a new Tensor subclass" in msg
+                    ):
+                        return x
+                    raise
+                wrapped._mock_logical_shape = tuple(x.shape)
+                wrapped._mock_logical_stride = tuple(x.stride())
+                wrapped._mock_storage_offset = x.storage_offset()
+                return wrapped
+            if isinstance(x, (tuple, list)):
+                return type(x)(_rewrap(v) for v in x)
+            if isinstance(x, dict):
+                return {k: _rewrap(v) for k, v in x.items()}
+            return x
+
+        def _is_view_like(torch_func):
+            name = getattr(torch_func, "__name__", "")
+            return name in {
+                "unsqueeze",
+                "unsqueeze_",
+                "squeeze",
+                "squeeze_",
+                "view",
+                "reshape",
+                "permute",
+                "transpose",
+                "t",
+                "detach",
+                "alias",
+            }
+
+        def _is_mock_only_cpu_boundary(torch_func, torch_args, torch_kwargs):
+            name = getattr(torch_func, "__name__", "")
+            has_mock_tensor_arg = any(
+                isinstance(arg, MockSpyreTensor) for arg in torch_args
+            )
+            out_tensor = torch_kwargs.get("out") if isinstance(torch_kwargs, dict) else None
+            has_mock_out = isinstance(out_tensor, MockSpyreTensor)
+
+            if name in {"rsqrt", "__getitem__", "copy_", "cat", "sin", "cos", "arange"}:
+                return has_mock_tensor_arg or has_mock_out
+
+            if name == "addmm":
+                return has_mock_out or has_mock_tensor_arg
+
+            return False
+
+        def _warn_and_run_cpu_fallback(torch_func, torch_args, torch_kwargs):
+            from torch_spyre.ops.fallbacks import fallback_ops, warn_fallback
+
+            cpu_args = _unwrap(torch_args)
+            cpu_kwargs = _unwrap(torch_kwargs)
+
+            fallback_name = None
+            func_name = getattr(torch_func, "__name__", "")
+            normalized_func_names = {
+                func_name,
+                func_name.replace("aten::", ""),
+                func_name.replace("aten::", "").split(".")[0],
+                func_name.split(".")[0],
+            }
+            for fallback_op in fallback_ops:
+                op_name = getattr(fallback_op, "_name", "")
+                if not isinstance(op_name, str):
+                    continue
+                normalized_op_names = {
+                    op_name,
+                    op_name.replace("aten::", ""),
+                    op_name.replace("aten::", "").split(".")[0],
+                    op_name.split(".")[0],
+                    op_name.split(".")[-1],
+                }
+                if normalized_func_names & normalized_op_names:
+                    fallback_name = op_name
+                    break
+
+            warn_fallback(fallback_name or func_name or str(torch_func))
+            result = torch_func(*cpu_args, **cpu_kwargs)
+
+            func_name = getattr(torch_func, "__name__", "")
+            if func_name == "copy_" and torch_args:
+                dst = torch_args[0]
+                if isinstance(dst, MockSpyreTensor):
+                    return dst
+
+            if func_name in {"sin", "cos", "arange"}:
+                out_tensor = torch_kwargs.get("out") if isinstance(torch_kwargs, dict) else None
+                if isinstance(out_tensor, MockSpyreTensor):
+                    return out_tensor
+
+            return _rewrap(result)
+
+        if getattr(func, "__name__", "") == "contiguous" and args and isinstance(args[0], MockSpyreTensor):
+            return args[0]
+
+        if _is_view_like(func):
+            cpu_args = _unwrap(args)
+            cpu_kwargs = _unwrap(kwargs)
+            result = func(*cpu_args, **cpu_kwargs)
+            return _rewrap(result)
+
+        if _is_mock_only_cpu_boundary(func, args, kwargs):
+            if MOCK_DEVICE_ENABLED:
+                _mock_print(
+                    f"[MOCK_DEVICE] mock-only CPU boundary fallback for {getattr(func, '__name__', func)}"
+                )
+            return _warn_and_run_cpu_fallback(func, args, kwargs)
+
+        try:
+            result = super().__torch_function__(func, types_, args, kwargs)
+        except RuntimeError as e:
+            msg = str(e)
+            if "PyTorch is not linked with support for spyre devices" not in msg:
+                raise
+            if MOCK_DEVICE_ENABLED:
+                _mock_print(
+                    f"[MOCK_DEVICE] __torch_function__ fallback for {getattr(func, '__name__', func)}"
+                )
+            out_tensor = kwargs.get("out")
+            cpu_kwargs = _unwrap(kwargs)
+            cpu_out_tensor = cpu_kwargs.get("out") if isinstance(cpu_kwargs, dict) else None
+            result = _warn_and_run_cpu_fallback(func, args, kwargs)
+
+            if isinstance(out_tensor, MockSpyreTensor) and isinstance(cpu_out_tensor, torch.Tensor):
+                return MockSpyreTensor(cpu_out_tensor)
+
+            return result
+        else:
+            copy_src = getattr(result, "_mock_spyre_copy_src", None)
+            if copy_src is not None:
+                func_name = getattr(func, "__name__", "")
+                if func_name == "copy_" and args:
+                    dst = args[0]
+                    dst_copy_src = getattr(dst, "_mock_spyre_copy_src", None)
+                    if dst_copy_src is not None:
+                        return _rewrap(_unwrap(dst_copy_src))
+                    return _rewrap(_unwrap(dst))
+
+                out_tensor = kwargs.get("out")
+                if isinstance(out_tensor, MockSpyreTensor):
+                    out_copy_src = getattr(out_tensor, "_mock_spyre_copy_src", None)
+                    if out_copy_src is not None:
+                        return _rewrap(_unwrap(out_copy_src))
+
+                if func_name in {"add_", "mul_"} and args:
+                    dst = args[0]
+                    if isinstance(dst, MockSpyreTensor):
+                        return dst
+
+                return _rewrap(_unwrap(copy_src))
+
+            if getattr(func, "__name__", "") in {"add_", "mul_"} and args:
+                dst = args[0]
+                if isinstance(dst, MockSpyreTensor):
+                    return dst
+
+            if any(isinstance(arg, MockSpyreTensor) for arg in args):
+                func_name = getattr(func, "__name__", "")
+                if func_name:
+                    try:
+                        from torch_spyre.ops.fallbacks import fallback_ops, warn_fallback
+
+                        normalized_func_names = {
+                            func_name,
+                            func_name.replace("aten::", ""),
+                            func_name.replace("aten::", "").split(".")[0],
+                            func_name.split(".")[0],
+                        }
+                        for fallback_op in fallback_ops:
+                            op_name = getattr(fallback_op, "_name", "")
+                            if not isinstance(op_name, str):
+                                continue
+                            normalized_op_names = {
+                                op_name,
+                                op_name.replace("aten::", ""),
+                                op_name.replace("aten::", "").split(".")[0],
+                                op_name.split(".")[0],
+                                op_name.split(".")[-1],
+                            }
+                            if normalized_func_names & normalized_op_names:
+                                warn_fallback(op_name)
+                                break
+                    except Exception:
+                        pass
+
+            return result
 
 
 def to_mock_spyre(tensor):
@@ -156,7 +440,7 @@ def to_mock_spyre(tensor):
         return tensor
     
     if MOCK_DEVICE_ENABLED:
-        print(f"[MOCK_DEVICE] Converting tensor to mock Spyre device")
+        _mock_print(f"[MOCK_DEVICE] Converting tensor to mock Spyre device")
     
     return MockSpyreTensor(tensor)
 
@@ -187,7 +471,7 @@ def _patched_tensor_to(self, *args, **kwargs):
         # If target is spyre, convert to MockSpyreTensor
         if device:
             if MOCK_DEVICE_ENABLED:
-                print(f"[MOCK_DEVICE] Intercepted .to('spyre') call")
+                _mock_print(f"[MOCK_DEVICE] Intercepted .to('spyre') call")
             return to_mock_spyre(self)
         
         # Otherwise use original implementation
@@ -196,7 +480,7 @@ def _patched_tensor_to(self, *args, **kwargs):
         # If PyTorch rejects the device, check if it's spyre and handle it
         if 'spyre' in str(e).lower() or 'privateuse1' in str(e).lower():
             if MOCK_DEVICE_ENABLED:
-                print(f"[MOCK_DEVICE] Caught PyTorch device error, converting to MockSpyreTensor")
+                _mock_print(f"[MOCK_DEVICE] Caught PyTorch device error, converting to MockSpyreTensor")
             return to_mock_spyre(self)
         raise
 
@@ -206,9 +490,9 @@ def install_mock_device_patches():
     if not MOCK_DEVICE_ENABLED:
         return
     
-    print("[MOCK_DEVICE] Installing tensor.to() patch for Spyre device")
+    _mock_print("[MOCK_DEVICE] Installing tensor.to() patch for Spyre device")
     torch.Tensor.to = _patched_tensor_to  # type: ignore
-    print("[MOCK_DEVICE] Mock device patches installed successfully")
+    _mock_print("[MOCK_DEVICE] Mock device patches installed successfully")
 
 
 # Auto-install if mock device is enabled

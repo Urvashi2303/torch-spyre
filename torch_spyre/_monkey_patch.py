@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Optional
+import os
 
 # Try to import from _C, but allow graceful failure
 try:
@@ -28,9 +29,16 @@ except (ImportError, ModuleNotFoundError):
     _C_AVAILABLE = False
 
 
+MOCK_VERBOSE = os.environ.get("TORCH_SPYRE_MOCK_VERBOSE", "0") == "1"
+
+
+def _mock_print(*args, **kwargs):
+    if MOCK_VERBOSE:
+        print(*args, **kwargs)
+
+
 def _patch_tensor_for_spyre():
     import torch
-    import os
 
     if getattr(torch.Tensor, "_spyre_tensor_patched", False):
         return
@@ -53,6 +61,11 @@ def _patch_tensor_for_spyre():
     orig_repr = torch.Tensor.__repr__
     orig_to = torch.Tensor.to
     orig_empty = torch.empty
+    orig_tensor = torch.tensor
+    orig_zeros = torch.zeros
+    orig_ones = torch.ones
+    orig_full = torch.full
+    orig_randn = torch.randn
 
     def spyre_aware_repr(self):
         dev = getattr(self, "device", None)
@@ -107,13 +120,27 @@ def _patch_tensor_for_spyre():
         if target_device and 'spyre' in target_device and mock_device_enabled:
             try:
                 from torch_spyre.mock_device_integration.mock_spyre_tensor import MockSpyreTensor
-                print(f"[MOCK_DEVICE] Intercepting .to('spyre') - converting to MockSpyreTensor")
+                _mock_print(f"[MOCK_DEVICE] Intercepting .to('spyre') - converting to MockSpyreTensor")
                 return MockSpyreTensor(self)
             except ImportError as e:
                 import warnings
                 warnings.warn(f"Could not import MockSpyreTensor: {e}", RuntimeWarning)
                 # Fall through to original behavior
         
+        # Preserve explicit device_layout in mock mode even when no explicit spyre
+        # target device string is passed (e.g. x.to(device_layout=layout)).
+        if device_layout is not None and mock_device_enabled:
+            try:
+                from torch_spyre.mock_device_integration.mock_spyre_tensor import MockSpyreTensor
+                from torch_spyre._C import get_spyre_tensor_layout
+
+                base = self if isinstance(self, MockSpyreTensor) else MockSpyreTensor(self)
+                setattr(base, "_mock_device_layout", device_layout)
+                return base
+            except ImportError as e:
+                import warnings
+                warnings.warn(f"Could not preserve mock device layout: {e}", RuntimeWarning)
+
         # Original behavior for non-spyre devices or when _C is available
         if device_layout is None:
             return orig_to(self, *args, **kwargs)
@@ -122,6 +149,44 @@ def _patch_tensor_for_spyre():
                 return to_with_layout(self, device_layout)
             else:
                 return orig_to(self, *args, **kwargs)
+
+    def spyre_tensor(data, *args, **kwargs):
+        if mock_device_enabled:
+            device = kwargs.get("device", None)
+            device_type = None
+            if isinstance(device, str):
+                device_type = device.split(":", 1)[0]
+            else:
+                device_type = getattr(device, "type", None)
+
+            if device_type == "spyre":
+                kwargs = dict(kwargs)
+                kwargs["device"] = "cpu"
+                cpu_tensor = orig_tensor(data, *args, **kwargs)
+                if type(cpu_tensor).__name__ == "FakeTensor" or getattr(
+                    getattr(cpu_tensor, "device", None), "type", None
+                ) == "meta":
+                    return cpu_tensor
+                from torch_spyre.mock_device_integration.mock_spyre_tensor import (
+                    MockSpyreTensor,
+                )
+
+                return MockSpyreTensor(cpu_tensor)
+
+        return orig_tensor(data, *args, **kwargs)
+
+    def _mock_wrap_factory_result(result):
+        if type(result).__name__ == "FakeTensor" or getattr(
+            getattr(result, "device", None), "type", None
+        ) == "meta":
+            return result
+        from torch_spyre.mock_device_integration.mock_spyre_tensor import MockSpyreTensor
+        return MockSpyreTensor(result)
+
+    def _normalize_mock_factory_device(device):
+        if isinstance(device, str):
+            return device.split(":", 1)[0]
+        return getattr(device, "type", None)
 
     def spyre_empty(
         *args,
@@ -134,9 +199,35 @@ def _patch_tensor_for_spyre():
         pin_memory=False,
         memory_format=torch.contiguous_format,
     ):
-        if (
-            device_layout is None
-        ):  # use original implementation if no layout is provided
+        if device_layout is None:  # use original implementation if no layout is provided
+            if mock_device_enabled and device is not None:
+                device_type = None
+                if isinstance(device, str):
+                    device_type = device.split(":", 1)[0]
+                else:
+                    device_type = getattr(device, "type", None)
+
+                if device_type == "spyre":
+                    cpu_tensor = orig_empty(
+                        *args,
+                        out=None,
+                        dtype=dtype,
+                        layout=layout,
+                        device="cpu",
+                        requires_grad=requires_grad,
+                        pin_memory=pin_memory,
+                        memory_format=memory_format,
+                    )
+                    if type(cpu_tensor).__name__ == "FakeTensor" or getattr(
+                        getattr(cpu_tensor, "device", None), "type", None
+                    ) == "meta":
+                        return cpu_tensor
+                    from torch_spyre.mock_device_integration.mock_spyre_tensor import (
+                        MockSpyreTensor,
+                    )
+
+                    return MockSpyreTensor(cpu_tensor)
+
             return orig_empty(
                 *args,
                 out=out,
@@ -155,11 +246,58 @@ def _patch_tensor_for_spyre():
                 *args, device_layout, dtype, device, pin_memory, memory_format
             )
 
+    def spyre_zeros(*args, **kwargs):
+        if mock_device_enabled and _normalize_mock_factory_device(kwargs.get("device")) == "spyre":
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+            return _mock_wrap_factory_result(orig_zeros(*args, **kwargs))
+        return orig_zeros(*args, **kwargs)
+
+    def spyre_ones(*args, **kwargs):
+        if mock_device_enabled and _normalize_mock_factory_device(kwargs.get("device")) == "spyre":
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+            return _mock_wrap_factory_result(orig_ones(*args, **kwargs))
+        return orig_ones(*args, **kwargs)
+
+    def spyre_full(*args, **kwargs):
+        if mock_device_enabled:
+            normalized_device = _normalize_mock_factory_device(kwargs.get("device"))
+            if normalized_device == "spyre":
+                kwargs = dict(kwargs)
+                kwargs["device"] = "cpu"
+                return _mock_wrap_factory_result(orig_full(*args, **kwargs))
+            if normalized_device == "cpu":
+                return orig_full(*args, **kwargs)
+        return orig_full(*args, **kwargs)
+
+    def spyre_randn(*args, **kwargs):
+        if mock_device_enabled and _normalize_mock_factory_device(kwargs.get("device")) == "spyre":
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+            return _mock_wrap_factory_result(orig_randn(*args, **kwargs))
+        return orig_randn(*args, **kwargs)
+
+    orig_empty_like = torch.empty_like
+
+    def spyre_empty_like(*args, **kwargs):
+        if mock_device_enabled and _normalize_mock_factory_device(kwargs.get("device")) == "spyre":
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+            return _mock_wrap_factory_result(orig_empty_like(*args, **kwargs))
+        return orig_empty_like(*args, **kwargs)
+
     torch.Tensor.__repr__ = spyre_aware_repr
     torch.Tensor.device_tensor_layout = device_tensor_layout
     torch.Tensor._spyre_tensor_patched = True
     torch.Tensor.to = spyre_to
     torch.empty = spyre_empty
+    torch.empty_like = spyre_empty_like
+    torch.tensor = spyre_tensor
+    torch.zeros = spyre_zeros
+    torch.ones = spyre_ones
+    torch.full = spyre_full
+    torch.randn = spyre_randn
 
 
 def _patch_torch_device():
@@ -182,7 +320,7 @@ def _patch_torch_device():
         def __new__(cls, device):
             # If it's a spyre device string, create a CPU device but mark it
             if isinstance(device, str) and 'spyre' in device:
-                print("[MOCK_DEVICE] torch.device('spyre') called - creating mock device")
+                _mock_print("[MOCK_DEVICE] torch.device('spyre') called - creating mock device")
                 # Return a regular CPU device - the .to() method will handle conversion
                 return _original_torch_device('cpu')
             elif isinstance(device, torch.device) and device.type == 'spyre':
@@ -193,4 +331,4 @@ def _patch_torch_device():
     # Replace torch.device with our wrapper
     torch.device = SpyreDeviceWrapper
     torch.device._spyre_device_patched = True
-    print("[MOCK_DEVICE] torch.device patched to handle 'spyre' device")
+    _mock_print("[MOCK_DEVICE] torch.device patched to handle 'spyre' device")
