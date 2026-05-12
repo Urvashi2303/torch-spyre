@@ -13,9 +13,11 @@ echo "=========================================="
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
-# Define mockdevice path
-MOCKDEVICE_DIR="../mock-device"
+# Define mockdevice path - can be overridden via environment variable or command line
+MOCKDEVICE_DIR="${MOCKDEVICE_DIR}"
 MOCKDEVICE_WHEEL="$MOCKDEVICE_DIR/dist/mockdevice-0.1.0-py3-none-any.whl"
+
+echo "Using mock-device directory: $MOCKDEVICE_DIR"
 
 # Step 1: Build mockdevice wheel if it doesn't exist
 echo ""
