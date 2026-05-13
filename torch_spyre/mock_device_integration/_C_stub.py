@@ -86,6 +86,10 @@ class SpyreTensorLayout:
         # Handle 3 calling patterns based on number of args
         if MOCK_DEVICE_ENABLED:
             _mock_print(f"[MOCK_DEVICE] SpyreTensorLayout.__init__ called with {len(args)} args: {args}")
+        
+        # Initialize dim_order to None by default
+        self.dim_order = None
+        
         if len(args) == 2:
             # Pattern 1: SpyreTensorLayout(size, dtype)
             host_size = list(args[0]) if hasattr(args[0], '__iter__') else [args[0]]
@@ -147,6 +151,9 @@ class SpyreTensorLayout:
                 host_size = list(args[0]) if hasattr(args[0], '__iter__') else [args[0]]
                 host_stride = list(args[1]) if hasattr(args[1], '__iter__') else [args[1]]
                 dim_order = args[3] if isinstance(args[3], list) else list(range(len(host_size)))
+                
+                # Store dim_order for compatibility checking
+                self.dim_order = dim_order
                 
                 # Convert torch dtype to device dtype
                 device_dtype = get_device_dtype(args[2])

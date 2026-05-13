@@ -60,9 +60,43 @@ def _has_nonuniform_stick_indexing(inputs):
     return len(stick_exprs) > 1
 
 
+def _check_dim_order_compatibility(tensor_args):
+    """
+    Check if input tensors have incompatible dim_maps.
+    In the actual hardware, operations fail when tensors have different
+    dim_maps (physical memory layouts), even if they have the same logical shape.
+    """
+    if not MOCK_DEVICE_ENABLED:
+        return
+    
+    # Get the dim_maps from the input tensor layouts
+    dim_maps = []
+    for arg in tensor_args:
+        layout = _get_device_layout(arg)
+        if layout is not None:
+            dim_map = getattr(layout, "dim_map", None)
+            if dim_map is not None and len(dim_map) > 0:
+                dim_maps.append(tuple(dim_map))
+    
+    if len(dim_maps) < 2:
+        return  # Need at least 2 tensors to check compatibility
+    
+    # Check if all dim_maps are identical
+    # Different dim_maps mean incompatible physical layouts
+    first_dim_map = dim_maps[0]
+    for dim_map in dim_maps[1:]:
+        if dim_map != first_dim_map:
+            raise RuntimeError(
+                "Spyre limitation: pointwise op with nonuniform stick indexing"
+            )
+
+
 def _wrap_add_lowering(original_lowering):
     def _mock_add_lowering(*args, **kwargs):
         tensor_args = [arg for arg in args if hasattr(arg, "layout")]
+
+        # Check dim_order compatibility before lowering
+        _check_dim_order_compatibility(tensor_args)
 
         result = original_lowering(*args, **kwargs)
 

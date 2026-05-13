@@ -10,25 +10,21 @@ cd /path/to/torch-spyre
 # Set mock-device directory path, mock-device github: https://github.ibm.com/Urvashi-Klair/mock-device/
 export MOCKDEVICE_DIR=/path/to/mock-device
 
-# Build everything (mock-device + torch-spyre)
+# Build and install (mock-device + torch-spyre)
 ./build_wheel_with_stubs.sh
-
-# Install torch-spyre (mock-device is already installed by the script)
-pip install dist/torch_spyre-*.whl
 ```
 
 That's it! The build script automatically:
-1. Builds mock-device wheel (if needed)
-2. Installs mock-device package
-3. Builds torch-spyre (no C++ compilation) and creates torch-spyre wheel
+1. **Uninstalls** old torch-spyre and mockdevice packages
+2. **Rebuilds** mock-device wheel (always fresh, includes latest operations)
+3. **Installs** mock-device package
+4. **Builds** torch-spyre wheel (no C++ compilation)
+5. **Installs** torch-spyre package
 
 ### Enable Mock Device
 ```bash
 # Set environment variable before running your code
 export TORCH_SPYRE_MOCK_DEVICE=1
-
-# Optional: Enable verbose logging
-export TORCH_SPYRE_MOCK_VERBOSE=1
 
 # Run your code
 python your_script.py

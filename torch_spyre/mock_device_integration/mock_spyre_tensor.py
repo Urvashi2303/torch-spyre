@@ -217,6 +217,33 @@ class MockSpyreTensor(torch.Tensor):
 
     @classmethod
     def __torch_function__(cls, func, types_, args=(), kwargs=None):
+        # Check stick dimension compatibility for pointwise operations
+        func_name = getattr(func, "__name__", "")
+        if func_name in {"add", "mul", "sub", "div"}:
+            # Get all MockSpyreTensor inputs
+            mock_tensors = [arg for arg in args if isinstance(arg, MockSpyreTensor)]
+            
+            if len(mock_tensors) >= 2:
+                # Extract stick dimensions from each tensor's layout
+                stick_dims = []
+                for tensor in mock_tensors:
+                    layout = getattr(tensor, "_mock_device_layout", None)
+                    if layout is not None:
+                        dim_map = getattr(layout, "dim_map", None)
+                        if dim_map is not None and len(dim_map) > 0:
+                            # Stick dimension is the last element of dim_map
+                            stick_dim = dim_map[-1]
+                            stick_dims.append(stick_dim)
+                
+                # Check if all stick dimensions are the same
+                if len(stick_dims) >= 2:
+                    first_stick_dim = stick_dims[0]
+                    for stick_dim in stick_dims[1:]:
+                        if stick_dim != first_stick_dim:
+                            raise RuntimeError(
+                                "Spyre limitation: pointwise op with nonuniform stick indexing"
+                            )
+
         kwargs = kwargs or {}
 
         def _unwrap(x):

@@ -113,9 +113,7 @@ class _SpyreImpl:
         if self._is_in_bad_fork():
             return True
         else:
-            return not hasattr(self, "_C") or (
-                self._C is not None and getattr(self._C, "is_available", lambda: True)()
-            )
+            return getattr(self._C, "is_available", lambda: True)()
 
     def is_initialized(self):
         return self._initialized and not self._is_in_bad_fork()
