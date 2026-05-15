@@ -293,6 +293,7 @@ class MockSpyreTensor(torch.Tensor):
                 "t",
                 "detach",
                 "alias",
+                "as_strided",
             }
 
         def _is_mock_only_cpu_boundary(torch_func, torch_args, torch_kwargs):
