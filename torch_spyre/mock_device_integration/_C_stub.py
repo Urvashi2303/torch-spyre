@@ -790,19 +790,35 @@ def _patch_fake_tensor_ops_for_mock():
 
         if func_name == "contiguous" and args and _is_mock_spyre_tensor(args[0]):
             if MOCK_DEVICE_ENABLED:
-                _mock_print("[MOCK_DEVICE] FakeTensor __torch_function__ no-op for contiguous on spyre")
-            return args[0]
+                _mock_print("[MOCK_DEVICE] FakeTensor __torch_function__ handling contiguous on spyre")
+            # For FakeTensors, PyTorch already handles contiguous() correctly
+            # We just need to preserve mock device attributes
+            assert original_fake_tensor_torch_function is not None
+            result = original_fake_tensor_torch_function(func, types, args, kwargs)
+            base = args[0]
+            if isinstance(result, FakeTensor) and _is_mock_spyre_tensor(base):
+                try:
+                    object.__setattr__(result, "_mock_device", getattr(base, "_mock_device", "spyre"))
+                    if hasattr(base, "_mock_device_layout"):
+                        object.__setattr__(result, "_mock_device_layout", base._mock_device_layout)
+                except Exception:
+                    pass
+            return result
 
         if func_name in {"transpose", "permute", "t", "unsqueeze", "squeeze"} and any(
             _is_mock_spyre_tensor(arg) for arg in flat_args
         ):
-            assert original_fake_tensor_torch_function is not None
-            result = original_fake_tensor_torch_function(func, types, args, kwargs)
+            # For view operations on mock spyre tensors, we need to create a new FakeTensor
+            # with the correct transformed shape, since PyTorch's FakeTensor doesn't know
+            # about our mock device and won't transform the shape correctly.
             base = args[0] if args else None
-            if isinstance(result, FakeTensor) and _is_mock_spyre_tensor(base):
-                base_shape = _logical_shape(base)
+            if isinstance(base, FakeTensor) and _is_mock_spyre_tensor(base):
+                # Calculate the new shape after the view operation
+                base_shape = tuple(base.shape)
+                new_shape = None
+                
                 try:
-                    if func_name == "transpose" and len(args) >= 3 and base_shape is not None:
+                    if func_name == "transpose" and len(args) >= 3:
                         dim0 = args[1]
                         dim1 = args[2]
                         rank = len(base_shape)
@@ -810,37 +826,54 @@ def _patch_fake_tensor_ops_for_mock():
                             dim0 += rank
                         if dim1 < 0:
                             dim1 += rank
-                        logical_shape = list(base_shape)
-                        logical_shape[dim0], logical_shape[dim1] = logical_shape[dim1], logical_shape[dim0]
-                        object.__setattr__(result, "_mock_logical_shape", tuple(logical_shape))
-                    elif func_name == "t" and base_shape is not None and len(base_shape) == 2:
-                        object.__setattr__(result, "_mock_logical_shape", (base_shape[1], base_shape[0]))
-                    elif func_name == "unsqueeze" and len(args) >= 2 and base_shape is not None:
+                        new_shape = list(base_shape)
+                        new_shape[dim0], new_shape[dim1] = new_shape[dim1], new_shape[dim0]
+                        new_shape = tuple(new_shape)
+                    elif func_name == "t" and len(base_shape) == 2:
+                        new_shape = (base_shape[1], base_shape[0])
+                    elif func_name == "unsqueeze" and len(args) >= 2:
                         dim = args[1]
                         rank = len(base_shape) + 1
                         if dim < 0:
                             dim += rank
-                        logical_shape = list(base_shape)
-                        logical_shape.insert(dim, 1)
-                        object.__setattr__(result, "_mock_logical_shape", tuple(logical_shape))
-                    elif func_name == "squeeze" and base_shape is not None:
+                        new_shape = list(base_shape)
+                        new_shape.insert(dim, 1)
+                        new_shape = tuple(new_shape)
+                    elif func_name == "squeeze":
                         if len(args) >= 2:
                             dim = args[1]
                             rank = len(base_shape)
                             if dim < 0:
                                 dim += rank
-                            logical_shape = list(base_shape)
-                            if 0 <= dim < len(logical_shape) and logical_shape[dim] == 1:
-                                logical_shape.pop(dim)
+                            new_shape = list(base_shape)
+                            if 0 <= dim < len(new_shape) and new_shape[dim] == 1:
+                                new_shape.pop(dim)
+                            new_shape = tuple(new_shape)
                         else:
-                            logical_shape = [d for d in base_shape if d != 1]
-                        object.__setattr__(result, "_mock_logical_shape", tuple(logical_shape))
-                    elif func_name == "permute" and len(args) >= 2 and base_shape is not None:
-                        dims = tuple(args[1])
-                        object.__setattr__(result, "_mock_logical_shape", tuple(base_shape[i] for i in dims))
+                            new_shape = tuple(d for d in base_shape if d != 1)
+                    elif func_name == "permute" and len(args) >= 2:
+                        dims = args[1] if isinstance(args[1], (list, tuple)) else tuple(args[1:])
+                        new_shape = tuple(base_shape[i] for i in dims)
+                    
+                    if new_shape is not None:
+                        # Create a new FakeTensor with the transformed shape
+                        fake_mode = base.fake_mode
+                        with fake_mode:
+                            result = fake_mode.from_tensor(
+                                torch.empty(new_shape, dtype=base.dtype, device='cpu'),
+                                static_shapes=True
+                            )
+                            # Copy mock device attributes
+                            object.__setattr__(result, "_mock_device", getattr(base, "_mock_device", "spyre"))
+                            if hasattr(base, "_mock_device_layout"):
+                                object.__setattr__(result, "_mock_device_layout", base._mock_device_layout)
+                        return result
                 except Exception:
                     pass
-            return result
+            
+            # Fallback to original implementation
+            assert original_fake_tensor_torch_function is not None
+            return original_fake_tensor_torch_function(func, types, args, kwargs)
 
         if func_name in {"mm", "matmul", "bmm"} and any(_is_mock_spyre_tensor(arg) for arg in flat_args):
             if MOCK_DEVICE_ENABLED:
