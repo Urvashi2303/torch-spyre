@@ -16,6 +16,7 @@ import os
 import types
 import math
 import sympy
+import torch
 
 # Check if mock device is enabled
 MOCK_DEVICE_ENABLED = os.environ.get('TORCH_SPYRE_MOCK_DEVICE', '0') == '1'
@@ -330,14 +331,40 @@ def spyre_empty_with_layout(*args, **kwargs):
         return torch.empty(*args[:1])
 
 
-def reinterpret_tensor(tensor, *args, **kwargs):
-    """Stub function"""
-    return tensor
+def reinterpret_tensor(tensor, size, stride, storage_offset):
+    """
+    Reinterpret a tensor with new size and stride (view operation).
+    This is used by the wrapper to create views like squeeze/unsqueeze/permute.
+    """
+    if MOCK_DEVICE_ENABLED:
+        _mock_print(f"[MOCK_DEVICE] reinterpret_tensor: {tuple(tensor.shape)} -> {tuple(size)}, stride={tuple(stride)}, offset={storage_offset}")
+    
+    # Use as_strided to create a view with the new shape and stride
+    return torch.as_strided(tensor, size, stride, storage_offset)
 
 
-def reinterpret_tensor_with_layout(tensor, *args, **kwargs):
-    """Stub function"""
-    return tensor
+def reinterpret_tensor_with_layout(tensor, size, stride, storage_offset, layout):
+    """
+    Reinterpret a tensor with new size, stride, and layout (view operation).
+    This is used by the wrapper to create views with specific device layouts.
+    """
+    if MOCK_DEVICE_ENABLED:
+        _mock_print(f"[MOCK_DEVICE] reinterpret_tensor_with_layout: {tuple(tensor.shape)} -> {tuple(size)}, stride={tuple(stride)}, offset={storage_offset}, layout={layout}")
+    
+    # Use as_strided to create a view with the new shape and stride
+    result = torch.as_strided(tensor, size, stride, storage_offset)
+    
+    # Preserve mock device attributes if present
+    if hasattr(tensor, '_mock_device'):
+        if isinstance(result, torch.Tensor) and not isinstance(result, MockSpyreTensor):
+            # Wrap in MockSpyreTensor to preserve attributes
+            mock_result = MockSpyreTensor.__new__(MockSpyreTensor, result)
+            mock_result._mock_device = tensor._mock_device
+            if hasattr(tensor, '_mock_device_layout'):
+                mock_result._mock_device_layout = layout
+            return mock_result
+    
+    return result
 
 
 def encode_constant(value, format):
