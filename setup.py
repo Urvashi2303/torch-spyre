@@ -14,35 +14,15 @@
 
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import cast
 
 os.environ.setdefault(
     "TORCH_DEVICE_BACKEND_AUTOLOAD", "0"
 )  # must be before torch import
-
-# Check if we should use stub dependencies
-USE_STUBS = os.environ.get("USE_STUBS", "0") == "1"
-
-if USE_STUBS:
-    # Set up stub paths for building without external dependencies
-    STUB_DIR = Path(__file__).resolve().parent / "torch_spyre" / "mockdevice" / "stubs"
-    # Add stub sendnn to Python path (only Python stub needed, no C++ compilation)
-    sys.path.insert(0, str(STUB_DIR))
-    print("=" * 60)
-    print("Building with STUB dependencies (Python-only)")
-    print(f"STUB_DIR: {STUB_DIR}")
-    print("No C++ compilation required")
-    print("=" * 60)
-else:
-    # Use real dependencies
-    os.environ.setdefault(
-        "SEN_COMMON_HEADERS", str(Path(__file__).resolve().parent.parent / "flex")
-    )
-    print("=" * 60)
-    print("Building with REAL dependencies")
-    print("=" * 60)
+os.environ.setdefault(
+    "SEN_COMMON_HEADERS", str(Path(__file__).resolve().parent.parent / "flex")
+)
 
 
 import glob
@@ -65,12 +45,6 @@ version = get_torch_spyre_version()
 
 
 def check_libflex():
-    # Check stub directory first if using stubs
-    if USE_STUBS:
-        stub_lib_dir = Path(__file__).resolve().parent / "torch_spyre" / "mockdevice" / "stubs" / "lib"
-        if stub_lib_dir.exists() and list(stub_lib_dir.glob("libflex.so*")):
-            return True
-
     ld_library_paths = os.environ.get("LD_LIBRARY_PATH", "").split(":")
     for path in ld_library_paths:
         if glob.glob(os.path.join(path, "libflex.so")):
@@ -139,9 +113,7 @@ if "RUNTIME_INSTALL_DIR" in os.environ:
     ]
     LIBRARY_DIRS += [RUNTIME_DIR / "lib"]
 
-# Only add SEN_COMMON_HEADERS if not using stubs (for real C++ build)
-if not USE_STUBS and "SEN_COMMON_HEADERS" in os.environ:
-    INCLUDE_DIRS += [os.environ["SEN_COMMON_HEADERS"]]
+INCLUDE_DIRS += [os.environ["SEN_COMMON_HEADERS"]]
 
 LIBRARIES = ["sendnn", "sendnn_interface", "flex"]
 
@@ -185,18 +157,11 @@ def run_codegen():
         cmd in sys.argv for cmd in ["dist_info", "egg_info", "install_egg_info"]
     )
 
-    # Skip sendnn check if using stubs
-    if not USE_STUBS and not importlib.util.find_spec("sendnn"):
+    if not importlib.util.find_spec("sendnn"):
         if not is_meta:
-            raise ImportError(
-                "sendnn is required for building. Install it first, or use USE_STUBS=1 to build without it."
-            )
+            raise ImportError("sendnn is required for building. Install it first.")
 
         print("Skipping codegen (sendnn not available, metadata extraction only)")
-        return None
-
-    if USE_STUBS:
-        print("Skipping codegen (using stubs, sendnn not required)")
         return None
 
     gen_script = CODEGEN_DIR / "gen.py"
@@ -231,108 +196,90 @@ if __name__ == "__main__":
             },
         )
     else:
-        # When using stubs, skip C++ compilation entirely
-        if USE_STUBS:
-            print("=" * 60)
-            print("SKIPPING C++ EXTENSION COMPILATION (USE_STUBS=1)")
-            print("Using Python-only mock device implementation")
-            print("=" * 60)
+        from torch.utils.cpp_extension import BuildExtension, CppExtension
 
-            OUTPUT_CODEGEN_DIR = run_codegen()
+        OUTPUT_CODEGEN_DIR = run_codegen()
 
-            setup(
-                entry_points={
-                    "torch.backends": [
-                        "torch_spyre = torch_spyre:_autoload",
-                    ],
-                },
-            )
-        else:
-            # Build with real C++ extensions
-            from torch.utils.cpp_extension import BuildExtension, CppExtension
+        sources = list(CSRC_DIR.glob("*.cpp"))
+        if OUTPUT_CODEGEN_DIR:
+            sources += list(OUTPUT_CODEGEN_DIR.glob("*.cpp"))
 
-            OUTPUT_CODEGEN_DIR = run_codegen()
+        # Filenames that belong to the tiny hooks module
+        hook_files = {"spyre_hooks.cpp"}
+        hooks_src_paths = [p for p in sources if p.name in hook_files]
+        core_src_paths = [p for p in sources if p.name not in hook_files]
+        hooks_src_paths = [
+            p.relative_to(ROOT_DIR).as_posix() for p in sorted(hooks_src_paths)
+        ]
+        core_src_paths = [
+            p.relative_to(ROOT_DIR).as_posix() for p in sorted(core_src_paths)
+        ]
 
-            sources = list(CSRC_DIR.glob("*.cpp"))
-            if OUTPUT_CODEGEN_DIR:
-                sources += list(OUTPUT_CODEGEN_DIR.glob("*.cpp"))
+        ext_modules = [
+            CppExtension(
+                name=f"{PACKAGE_NAME}._C",
+                sources=core_src_paths,
+                include_dirs=[str(p) for p in INCLUDE_DIRS],
+                library_dirs=[str(p) for p in LIBRARY_DIRS],
+                libraries=LIBRARIES,
+                extra_compile_args={"cxx": EXTRA_CXX_FLAGS},
+                define_macros=[
+                    ("PACKAGE_NAME", f'"{PACKAGE_NAME}"'),
+                    ("MODULE_NAME", f'"{PACKAGE_NAME}._C"'),
+                    ("SPYRE_DEBUG_ENV", '"TORCH_SPYRE_DEBUG"'),
+                    ("SPYRE_DOWNCAST_ENV", '"TORCH_SPYRE_DOWNCAST_WARN"'),
+                    ("EAGER_MODE_ENV", '"EAGER_MODE"'),
+                    ("BOOST_ALL_DYN_LINK", None),  # avoid static link to boost
+                ],
+            ),
+            CppExtension(
+                name=f"{PACKAGE_NAME}._hooks",
+                sources=hooks_src_paths,
+                include_dirs=[str(p) for p in INCLUDE_DIRS],
+                library_dirs=[str(p) for p in LIBRARY_DIRS],
+                libraries=LIBRARIES,
+                extra_compile_args={"cxx": EXTRA_CXX_FLAGS},
+                define_macros=[
+                    ("PACKAGE_NAME", f'"{PACKAGE_NAME}"'),
+                    ("MODULE_NAME", f'"{PACKAGE_NAME}._hooks"'),
+                    ("SPYRE_DEBUG_ENV", '"TORCH_SPYRE_DEBUG"'),
+                    ("SPYRE_DOWNCAST_ENV", '"TORCH_SPYRE_DOWNCAST_WARN"'),
+                    ("EAGER_MODE_ENV", '"EAGER_MODE"'),
+                    ("BOOST_ALL_DYN_LINK", None),  # avoid static link to boost
+                ],
+            ),
+        ]
 
-            # Filenames that belong to the tiny hooks module
-            hook_files = {"spyre_hooks.cpp"}
-            hooks_src_paths = [p for p in sources if p.name in hook_files]
-            core_src_paths = [p for p in sources if p.name not in hook_files]
-            hooks_src_paths = [
-                p.relative_to(ROOT_DIR).as_posix() for p in sorted(hooks_src_paths)
-            ]
-            core_src_paths = [
-                p.relative_to(ROOT_DIR).as_posix() for p in sorted(core_src_paths)
-            ]
+        BUILD_DIR = ROOT_DIR / "build"
 
-            ext_modules = [
-                CppExtension(
-                    name=f"{PACKAGE_NAME}._C",
-                    sources=core_src_paths,
-                    include_dirs=[str(p) for p in INCLUDE_DIRS],
-                    library_dirs=[str(p) for p in LIBRARY_DIRS],
-                    libraries=LIBRARIES,
-                    extra_compile_args={"cxx": EXTRA_CXX_FLAGS},
-                    define_macros=[
-                        ("PACKAGE_NAME", f'"{PACKAGE_NAME}"'),
-                        ("MODULE_NAME", f'"{PACKAGE_NAME}._C"'),
-                        ("SPYRE_DEBUG_ENV", '"TORCH_SPYRE_DEBUG"'),
-                        ("SPYRE_DOWNCAST_ENV", '"TORCH_SPYRE_DOWNCAST_WARN"'),
-                        ("EAGER_MODE_ENV", '"EAGER_MODE"'),
-                        ("BOOST_ALL_DYN_LINK", None),  # avoid static link to boost
-                    ],
-                ),
-                CppExtension(
-                    name=f"{PACKAGE_NAME}._hooks",
-                    sources=hooks_src_paths,
-                    include_dirs=[str(p) for p in INCLUDE_DIRS],
-                    library_dirs=[str(p) for p in LIBRARY_DIRS],
-                    libraries=LIBRARIES,
-                    extra_compile_args={"cxx": EXTRA_CXX_FLAGS},
-                    define_macros=[
-                        ("PACKAGE_NAME", f'"{PACKAGE_NAME}"'),
-                        ("MODULE_NAME", f'"{PACKAGE_NAME}._hooks"'),
-                        ("SPYRE_DEBUG_ENV", '"TORCH_SPYRE_DEBUG"'),
-                        ("SPYRE_DOWNCAST_ENV", '"TORCH_SPYRE_DOWNCAST_WARN"'),
-                        ("EAGER_MODE_ENV", '"EAGER_MODE"'),
-                        ("BOOST_ALL_DYN_LINK", None),  # avoid static link to boost
-                    ],
-                ),
-            ]
+        _BuildExtension = BuildExtension.with_options(
+            no_python_abi_suffix=True, verbose=True
+        )
 
-            BUILD_DIR = ROOT_DIR / "build"
+        class PermanentBuildExtension(_BuildExtension):
+            def finalize_options(self):
+                super().finalize_options()
+                self.build_temp = str(BUILD_DIR)
 
-            _BuildExtension = BuildExtension.with_options(
-                no_python_abi_suffix=True, verbose=True
-            )
+            def build_extension(self, ext):
+                # Use a per-extension subdirectory so each gets its own build.ninja
+                original_build_temp = self.build_temp
+                self.build_temp = os.path.join(original_build_temp, ext.name)
+                os.makedirs(self.build_temp, exist_ok=True)
+                try:
+                    super().build_extension(ext)
+                finally:
+                    self.build_temp = original_build_temp
 
-            class PermanentBuildExtension(_BuildExtension):
-                def finalize_options(self):
-                    super().finalize_options()
-                    self.build_temp = str(BUILD_DIR)
-
-                def build_extension(self, ext):
-                    # Use a per-extension subdirectory so each gets its own build.ninja
-                    original_build_temp = self.build_temp
-                    self.build_temp = os.path.join(original_build_temp, ext.name)
-                    os.makedirs(self.build_temp, exist_ok=True)
-                    try:
-                        super().build_extension(ext)
-                    finally:
-                        self.build_temp = original_build_temp
-
-            setup(
-                ext_modules=ext_modules,
-                cmdclass={
-                    "build_ext": PermanentBuildExtension,
-                    "clean": clean,
-                },
-                entry_points={
-                    "torch.backends": [
-                        "torch_spyre = torch_spyre:_autoload",
-                    ],
-                },
-            )
+        setup(
+            ext_modules=ext_modules,
+            cmdclass={
+                "build_ext": PermanentBuildExtension,
+                "clean": clean,
+            },
+            entry_points={
+                "torch.backends": [
+                    "torch_spyre = torch_spyre:_autoload",
+                ],
+            },
+        )
