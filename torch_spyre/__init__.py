@@ -285,16 +285,6 @@ def _autoload():
 
             install_mock_compile_patches()
 
-        try:
-            import builtins
-            from torch.testing._internal import common_device_type as _common_device_type
-
-            if not hasattr(builtins, "device_type_test_bases") and hasattr(
-                _common_device_type, "device_type_test_bases"
-            ):
-                builtins.device_type_test_bases = _common_device_type.device_type_test_bases
-        except Exception:
-            pass
     
     # In lightweight/mock environments, tests may still request the historical
     # "sendnn" backend name for CPU reference compilation. If that backend is not
