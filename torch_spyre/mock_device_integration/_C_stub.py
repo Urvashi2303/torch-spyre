@@ -426,6 +426,134 @@ def launch_kernel(*args, **kwargs):
     )
 
 
+_mock_current_device_index = 0
+_mock_stream_state = {
+    "next_id": 1,
+    "default_streams": {},
+    "current_streams": {},
+}
+
+
+class _MockStreamHandle:
+    def __init__(self, device, stream_id, priority=0, is_default=False):
+        self._device = torch.device(device)
+        self._id = int(stream_id)
+        self._priority = int(priority)
+        self._is_default = bool(is_default)
+        self._complete = True
+
+    def synchronize(self):
+        self._complete = True
+        return None
+
+    def query(self):
+        return True
+
+    def device(self):
+        return self._device
+
+    def id(self):
+        return self._id
+
+    def priority(self):
+        return self._priority
+
+    def __repr__(self):
+        return (
+            f"torch_spyre.Stream(device='{self._device}', "
+            f"id={self._id}, priority={self._priority})"
+        )
+
+
+def _normalize_mock_device(device=None):
+    if device is None:
+        return torch.device("spyre", _mock_current_device_index)
+    if isinstance(device, int):
+        return torch.device("spyre", device)
+    if isinstance(device, str):
+        return torch.device(device)
+    return torch.device(device)
+
+
+def _device_key(device):
+    dev = _normalize_mock_device(device)
+    return (dev.type, 0 if dev.index is None else dev.index)
+
+
+def default_stream(device=None):
+    dev = _normalize_mock_device(device)
+    key = _device_key(dev)
+    stream = _mock_stream_state["default_streams"].get(key)
+    if stream is None:
+        stream = _MockStreamHandle(dev, stream_id=0, priority=0, is_default=True)
+        _mock_stream_state["default_streams"][key] = stream
+    _mock_stream_state["current_streams"].setdefault(key, stream)
+    return stream
+
+
+def current_stream(device=None):
+    dev = _normalize_mock_device(device)
+    key = _device_key(dev)
+    stream = _mock_stream_state["current_streams"].get(key)
+    if stream is None:
+        stream = default_stream(dev)
+    return stream
+
+
+def get_stream_from_pool(device=None, priority=0):
+    dev = _normalize_mock_device(device)
+    stream_id = _mock_stream_state["next_id"]
+    _mock_stream_state["next_id"] += 1
+    return _MockStreamHandle(dev, stream_id=stream_id, priority=priority)
+
+
+def set_current_stream(stream):
+    if stream is None:
+        return None
+    key = _device_key(stream.device())
+    _mock_stream_state["current_streams"][key] = stream
+    return None
+
+
+def synchronize(device=None):
+    if device is None:
+        for stream in list(_mock_stream_state["current_streams"].values()):
+            stream.synchronize()
+        for stream in list(_mock_stream_state["default_streams"].values()):
+            stream.synchronize()
+        return None
+    current_stream(device).synchronize()
+    return None
+
+
+def current_device():
+    return _mock_current_device_index
+
+
+def set_device(index):
+    global _mock_current_device_index
+    _mock_current_device_index = int(index)
+    default_stream(torch.device("spyre", _mock_current_device_index))
+    return None
+
+
+def _patch_torch_stream_api_for_mock():
+    if not MOCK_DEVICE_ENABLED:
+        return
+    if getattr(torch, "_spyre_mock_stream_patched", False):
+        return
+
+    def _mock_torch_stream(device=None, priority=0, **kwargs):
+        del kwargs
+        from torch_spyre.streams import Stream
+        return Stream(device=device, priority=priority)
+
+    torch.Stream = _mock_torch_stream
+    torch._streambase = getattr(torch, "_streambase", None)
+    torch._spyre_mock_stream_patched = True
+    _mock_print("[MOCK_DEVICE] Patched torch.Stream for mock spyre backend")
+
+
 def _patch_torch_accelerator_for_mock():
     """Patch torch.accelerator APIs that otherwise call into missing C++ spyre support."""
     if not MOCK_DEVICE_ENABLED:
@@ -454,13 +582,13 @@ def _patch_torch_accelerator_for_mock():
                 return torch_spyre.current_stream(device)
         except Exception:
             pass
-        return types.SimpleNamespace(device=lambda: torch.device("spyre", 0))
+        return current_stream(device)
 
     def _mock_set_device_index(device=None):
         return None
 
     def _mock_synchronize(device=None):
-        return None
+        return synchronize(device)
 
     accelerator.current_device_index = _mock_current_device_index
     accelerator.current_stream = _mock_current_stream
@@ -1294,6 +1422,8 @@ def start_runtime():
     if MOCK_DEVICE_ENABLED:
         _mock_print("[MOCK_DEVICE] Runtime initialized")
         _register_privateuse1_backend()
+        default_stream(torch.device("spyre", _mock_current_device_index))
+        _patch_torch_stream_api_for_mock()
         _patch_torch_accelerator_for_mock()
         _patch_fake_tensor_ops_for_mock()
         _patch_cpp_reduction_codegen_for_mock()
@@ -1436,6 +1566,13 @@ __all__ = [
     'convert_artifacts',
     'launch_kernel',
     'start_runtime',
+    'current_stream',
+    'default_stream',
+    'get_stream_from_pool',
+    'set_current_stream',
+    'synchronize',
+    'current_device',
+    'set_device',
     'get_device_dtype',
     'get_elem_in_stick',
     '_register_device',

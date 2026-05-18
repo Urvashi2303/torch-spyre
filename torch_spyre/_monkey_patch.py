@@ -40,12 +40,29 @@ def _mock_print(*args, **kwargs):
 def _patch_tensor_for_spyre():
     import torch
 
+    def _patch_mock_stream_api():
+        if not mock_device_enabled:
+            return
+        if getattr(torch, "_spyre_mock_stream_patched", False):
+            return
+
+        def _mock_torch_stream(device=None, priority=0, **kwargs):
+            del kwargs
+            from torch_spyre.streams import Stream
+            return Stream(device=device, priority=priority)
+
+        torch.Stream = _mock_torch_stream
+        torch._spyre_mock_stream_patched = True
+
     if getattr(torch.Tensor, "_spyre_tensor_patched", False):
+        _patch_mock_stream_api()
         return
     
     # Check if mock device mode is enabled
     mock_device_enabled = os.environ.get('TORCH_SPYRE_MOCK_DEVICE', '0') == '1'
     
+    _patch_mock_stream_api()
+
     # Skip patching if _C module is not available and mock device is not enabled
     if not _C_AVAILABLE and not mock_device_enabled:
         import warnings
