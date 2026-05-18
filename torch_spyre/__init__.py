@@ -293,11 +293,6 @@ def _autoload():
                 _common_device_type, "device_type_test_bases"
             ):
                 builtins.device_type_test_bases = _common_device_type.device_type_test_bases
-
-            if not hasattr(builtins, "PrivateUse1TestBase") and hasattr(
-                _common_device_type, "PrivateUse1TestBase"
-            ):
-                builtins.PrivateUse1TestBase = _common_device_type.PrivateUse1TestBase
         except Exception:
             pass
     
