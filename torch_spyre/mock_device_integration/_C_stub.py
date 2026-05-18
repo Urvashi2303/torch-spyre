@@ -543,12 +543,12 @@ def _patch_torch_stream_api_for_mock():
     if getattr(torch, "_spyre_mock_stream_patched", False):
         return
 
-    def _mock_torch_stream(device=None, priority=0, **kwargs):
-        del kwargs
-        from torch_spyre.streams import Stream
-        return Stream(device=device, priority=priority)
+    from torch_spyre.streams import Stream as _SpyreStream
 
-    torch.Stream = _mock_torch_stream
+    class _MockTorchStream(_SpyreStream):
+        pass
+
+    torch.Stream = _MockTorchStream
     torch._streambase = getattr(torch, "_streambase", None)
     torch._spyre_mock_stream_patched = True
     _mock_print("[MOCK_DEVICE] Patched torch.Stream for mock spyre backend")
