@@ -15,7 +15,6 @@
 
 from torch_spyre._C import encode_constant, DataFormats
 from sympy import Symbol
-import os
 
 
 def core_idx_to_slice_offset(
@@ -215,8 +214,6 @@ def generate_sdsc(sdsc_spec):
         }
         for c in range(sdsc_spec.num_cores)
     }
-    inject_bug = (os.getenv("INJECT_BUG"))
-    print(f"INJECT_BUG: {inject_bug}")
     return {
         sdsc_spec.opfunc: {
             "sdscFoldProps_": [{"factor_": 1, "label_": "time"}],
@@ -227,7 +224,7 @@ def generate_sdsc(sdsc_spec):
             },
             "coreFoldProp_": {"factor_": sdsc_spec.num_cores, "label_": "core"},
             "coreletFoldProp_": {"factor_": 1, "label_": "corelet"},
-            "numCoresUsed_": -1 if inject_bug else sdsc_spec.num_cores,
+            "numCoresUsed_": sdsc_spec.num_cores,
             "coreIdToDsc_": {str(c): 0 for c in range(sdsc_spec.num_cores)},
             "numWkSlicesPerDim_": {
                 str(dim): num_wk_slices
