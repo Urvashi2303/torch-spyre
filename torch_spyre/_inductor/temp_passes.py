@@ -14,17 +14,17 @@
 
 # This file contains inductor passes that are only needed as temp fixes
 
-import functools
+import contextlib
 from math import prod
 
 import torch
+from torch._guards import detect_fake_mode
 from torch.fx.experimental.symbolic_shapes import statically_known_true, sym_eq
 from torch._inductor.pattern_matcher import (
     Arg,
     CallFunction,
     Match,
     PatternMatcherPass,
-    fwd_only,
     register_graph_pattern,
 )
 from .logging_utils import get_inductor_logger
@@ -203,32 +203,36 @@ def _is_row_broadcast_gather(x, dim: int, index) -> bool:
     return any(index.shape[k] > 1 for k in trailing)
 
 
-def _row_gather(dim: int):
-    """Build ``gather(x, dim, index)`` as a plain row gather on ``x``.
+def _emit_row_gather(call, x, index, dim, x_shape, n, index_dtype, index_device):
+    """Emit ``gather(x, dim, index)`` as a plain row gather, one aten op at a time.
 
-    With P = prod(x.shape[:dim]) and T = x.shape[dim], output slab (p, j) is
-    slab ``p * T + index[p, j]`` of ``x.reshape(P * T, *x.shape[dim+1:])``. Only
-    the dims up to ``dim`` are merged; the trailing dims, which hold the stick,
-    keep their shape, since merging into the stick dim is not a view on Spyre.
+    With P = prod(x_shape[:dim]) and T = x_shape[dim], output slab (p, j) is slab
+    ``p * T + index[p, j]`` of ``x.reshape(P * T, *x_shape[dim+1:])``. Only the
+    dims up to ``dim`` are merged; the trailing dims, which hold the stick, keep
+    their shape, since merging into the stick dim is not a view on Spyre.
+
+    ``call(op, *args, **kwargs)`` applies one op: the pass passes a builder that
+    adds a graph node, and the unit test passes one that runs the op on tensors,
+    so both exercise this same sequence.
     """
-
-    def repl(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-        prefix = list(x.shape[:dim])
-        trailing = list(x.shape[dim + 1 :])
-        T, n = x.shape[dim], index.shape[dim]
-        P = prod(prefix)
-        # The index repeats along the trailing dims, so keep one entry per slab.
-        idx = index[(slice(None),) * (dim + 1) + (0,) * len(trailing)]
-        rows = idx.reshape(P, n)
-        if P > 1:
-            # Row offset of each prefix position. A stepped arange plus an int
-            # add keeps the index exact and avoids an int mul on the device.
-            base = torch.arange(0, P * T, T, dtype=idx.dtype, device=idx.device)
-            rows = rows + base.unsqueeze(1)
-        gathered = x.reshape(P * T, *trailing)[rows.reshape(P * n)]
-        return gathered.reshape(*prefix, n, *trailing)
-
-    return repl
+    prefix, trailing = list(x_shape[:dim]), list(x_shape[dim + 1 :])
+    T, P = x_shape[dim], prod(prefix)
+    # The index repeats along the trailing dims, so keep one entry per slab.
+    idx = index
+    for _ in trailing:
+        idx = call(aten.select.int, idx, dim + 1, 0)
+    rows = call(aten.reshape.default, idx, [P, n])
+    if P > 1:
+        # Row offset of each prefix position. A stepped arange plus an int add
+        # keeps the index exact and avoids an int mul on the device.
+        base = call(
+            aten.arange.start_step, 0, P * T, T, dtype=index_dtype, device=index_device
+        )
+        rows = call(aten.add.Tensor, rows, call(aten.unsqueeze.default, base, 1))
+    rows = call(aten.reshape.default, rows, [P * n])
+    table = call(aten.reshape.default, x, [P * T, *trailing])
+    gathered = call(aten.index.Tensor, table, [rows])
+    return call(aten.reshape.default, gathered, [*prefix, n, *trailing])
 
 
 @register_graph_pattern(
@@ -256,15 +260,37 @@ def _broadcast_gather_to_row_gather(
     )
     if not _is_row_broadcast_gather(x_val, dim, index_val):
         return
-    from .decompositions import get_spyre_decomp_table
+    dim = dim % x_val.dim()
 
-    # Trace with the Spyre table: the default one lowers arange to prims.iota,
-    # which Spyre does not run (see fallbacks.py); Spyre keeps aten.arange.
-    match.replace_by_example(
-        _row_gather(dim % x_val.dim()),
-        [x_node, index_node],
-        trace_fn=functools.partial(fwd_only, get_decomp_fn=get_spyre_decomp_table),
-    )
+    node = match.nodes[-1]
+    graph = node.graph
+    fake_mode = detect_fake_mode([x_val, index_val]) or contextlib.nullcontext()
+
+    def add_node(op, *args, **kwargs):
+        new_node = graph.call_function(op, args=args, kwargs=kwargs)
+        arg_vals, kwarg_vals = torch.fx.node.map_arg(
+            (args, kwargs), lambda a: a.meta["val"]
+        )
+        # Run the op on the inputs' fake values so the node's meta carries the
+        # real shape, stride, dtype and device.
+        with fake_mode:
+            new_node.meta["val"] = op(*arg_vals, **kwarg_vals)
+        copy_fx_custom_meta(node, new_node)
+        return new_node
+
+    with graph.inserting_before(node):
+        out = _emit_row_gather(
+            add_node,
+            x_node,
+            index_node,
+            dim,
+            tuple(x_val.shape),
+            index_val.shape[dim],
+            index_val.dtype,
+            index_val.device,
+        )
+    node.replace_all_uses_with(out)
+    graph.erase_node(node)
 
 
 def _is_batch_collapsing_reshape(node: torch.fx.Node) -> bool:

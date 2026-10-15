@@ -791,7 +791,7 @@ class TestBroadcastGatherRewrite(IndirectAccessTestCase):
     """The #4840 rewrite of a trailing-broadcast gather into a row gather.
 
     Runs on CPU tensors: `_is_row_broadcast_gather` decides from shapes and
-    strides alone, and `_row_gather` must equal torch.gather exactly.
+    strides alone, and `_emit_row_gather` must equal torch.gather exactly.
     """
 
     @staticmethod
@@ -802,9 +802,12 @@ class TestBroadcastGatherRewrite(IndirectAccessTestCase):
 
     def test_row_gather_matches_torch_gather(self):
         from torch_spyre._inductor.temp_passes import (
+            _emit_row_gather,
             _is_row_broadcast_gather,
-            _row_gather,
         )
+
+        def run_op(op, *args, **kwargs):
+            return op(*args, **kwargs)
 
         cases = [((12, 4, 512), 1), ((64, 256), 0), ((2, 6, 4, 128), 1)]
         cases += [((2, 3, 5, 64), 2), ((1, 4, 64), 1)]
@@ -815,8 +818,18 @@ class TestBroadcastGatherRewrite(IndirectAccessTestCase):
                         x = torch.randn(shape)
                         idx = self._broadcast_index(shape, dim, n, dtype)
                         self.assertTrue(_is_row_broadcast_gather(x, dim, idx))
+                        got = _emit_row_gather(
+                            run_op,
+                            x,
+                            idx,
+                            dim,
+                            x.shape,
+                            idx.shape[dim],
+                            idx.dtype,
+                            idx.device,
+                        )
                         torch.testing.assert_close(
-                            _row_gather(dim)(x, idx),
+                            got,
                             torch.gather(x, dim, idx),
                             rtol=0,
                             atol=0,
