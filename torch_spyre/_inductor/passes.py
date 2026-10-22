@@ -41,7 +41,6 @@ from .provenance import SpyreGraphTransformObserver, reset_provenance_warnings
 from .padding import insert_bmm_padding, insert_restickify_padding
 from .temp_passes import (
     bmm_unflatten_pass,
-    broadcast_gather_pass,
     decompose_addmm,
     mm_to_bmm_pass,
 )
@@ -74,6 +73,7 @@ from .insert_restickify import (
     validate_no_restickify_on_mutation_targets,
 )
 from .enforce_indirect_access_layout import enforce_indirect_access_layout
+from .fold_shared_indirect_dims import fold_shared_indirect_dims
 from .hbm_pool_planning import hbm_pool_planning
 from .work_division import (
     span_reduction,
@@ -283,9 +283,6 @@ class CustomPostPasses(_SpyreGraphPassPipeline):
                 decompose_addmm,
                 mm_to_bmm_pass.apply,
                 bmm_unflatten_pass.apply,
-                # Turn a gather whose index is broadcast along the trailing
-                # dims into a row gather on a flattened source (#4840).
-                broadcast_gather_pass.apply,
             ]
         )
 
@@ -521,6 +518,12 @@ class CustomPreSchedulingPasses:
             # Convert for_each_tile WhileLoops bodies into inlined IR with loop_infos
             splice_while_loops,
             deadcode_elimination,
+            #
+            # Fold a loop dim that both reads a gather index and addresses the
+            # gathered tensor into the index (#4840). Runs before named dims and
+            # stickification so its new arange/add ops are handled like any
+            # user-written op.
+            fold_shared_indirect_dims,
             #
             # Working Set Reduction (hint-driven, pre-stickification)
             # These passes only need host-side FixedLayout (size/stride) and

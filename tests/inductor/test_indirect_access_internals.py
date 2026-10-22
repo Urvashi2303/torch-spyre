@@ -787,86 +787,61 @@ class TestMaskedScatterRejectReason(IndirectAccessTestCase):
         self.assertIn("rank", reason)
 
 
-class TestBroadcastGatherRewrite(IndirectAccessTestCase):
-    """The #4840 rewrite of a trailing-broadcast gather into a row gather.
+class TestFoldSharedDimHandler(IndirectAccessTestCase):
+    """`_FoldSharedDimHandler`: the inner_fn rewrite of fold_shared_indirect_dims.
 
-    Runs on CPU tensors: `_is_row_broadcast_gather` decides from shapes and
-    strides alone, and `_emit_row_gather` must equal torch.gather exactly.
+    Device-free: drives the handler with a recording ops handler, using the #4840
+    load pattern (index `pos[d0]`, value `2048*d0 + 512*s + d1` on a [12, 4, 512]
+    source), and checks the exact rewrite it forwards.
     """
 
-    @staticmethod
-    def _broadcast_index(shape, dim, n, dtype=torch.int64):
-        small = [*shape[:dim], n] + [1] * (len(shape) - dim - 1)
-        idx = torch.randint(0, shape[dim], small, dtype=dtype)
-        return idx.expand(*shape[:dim], n, *shape[dim + 1 :])
+    class _RecordingOps:
+        def __init__(self):
+            self.loads = []
+            self.sizes = []
 
-    def test_row_gather_matches_torch_gather(self):
-        from torch_spyre._inductor.temp_passes import (
-            _emit_row_gather,
-            _is_row_broadcast_gather,
+        def load(self, name, index):
+            self.loads.append((name, index))
+            return f"v{len(self.loads)}"
+
+        def indirect_indexing(self, var, size, check=True, wrap_neg=True):
+            self.sizes.append(size)
+            return sympy.Symbol("s")
+
+    def _handler(self):
+        from torch_spyre._inductor.fold_shared_indirect_dims import (
+            _FoldPlan,
+            _FoldSharedDimHandler,
         )
 
-        def run_op(op, *args, **kwargs):
-            return op(*args, **kwargs)
+        plan = _FoldPlan(
+            index_name="pos",
+            value_name="x",
+            index_coeff=1,
+            value_coeff=2048,
+            step=4,
+            extent=12,
+            index_dim=0,
+        )
+        inner = self._RecordingOps()
+        return inner, _FoldSharedDimHandler(inner, plan, "rows")
 
-        cases = [((12, 4, 512), 1), ((64, 256), 0), ((2, 6, 4, 128), 1)]
-        cases += [((2, 3, 5, 64), 2), ((1, 4, 64), 1)]
-        for shape, dim in cases:
-            for n in (1, 3):
-                for dtype in (torch.int32, torch.int64):
-                    with self.subTest(shape=shape, dim=dim, n=n, dtype=dtype):
-                        x = torch.randn(shape)
-                        idx = self._broadcast_index(shape, dim, n, dtype)
-                        self.assertTrue(_is_row_broadcast_gather(x, dim, idx))
-                        got = _emit_row_gather(
-                            run_op,
-                            x,
-                            idx,
-                            dim,
-                            x.shape,
-                            idx.shape[dim],
-                            idx.dtype,
-                            idx.device,
-                        )
-                        torch.testing.assert_close(
-                            got,
-                            torch.gather(x, dim, idx),
-                            rtol=0,
-                            atol=0,
-                        )
+    def test_reads_rows_and_drops_shared_term(self):
+        d0, d1 = sympy.symbols("d0 d1")
+        inner, handler = self._handler()
+        s = handler.indirect_indexing(handler.load("pos", d0), 4)
+        handler.load("x", 2048 * d0 + 512 * s + d1)
+        self.assertEqual(inner.loads, [("rows", d0), ("x", 512 * s + d1)])
+        # The folded row index covers all 12 blocks of 4 rows.
+        self.assertEqual(inner.sizes, [48])
 
-    def test_non_row_gathers_not_rewritten(self):
-        from torch_spyre._inductor.temp_passes import _is_row_broadcast_gather
-
-        x = torch.randn(12, 4, 512)
-        bcast = self._broadcast_index((12, 4, 512), 1, 1)
-        cases = {
-            "materialized index": (x, 1, bcast.contiguous()),
-            "gather along the last dim": (
-                x,
-                2,
-                torch.randint(0, 512, (12, 4, 1)).expand(12, 4, 512),
-            ),
-            "smaller prefix": (
-                x,
-                1,
-                torch.zeros(6, 1, 1, dtype=torch.int64).expand(6, 1, 512),
-            ),
-            "smaller trailing": (
-                x,
-                1,
-                torch.zeros(12, 1, 1, dtype=torch.int64).expand(12, 1, 256),
-            ),
-            "no real broadcast dim": (
-                torch.randn(12, 4, 1),
-                1,
-                torch.zeros(12, 1, 1, dtype=torch.int64),
-            ),
-            "float index": (x, 1, torch.zeros(12, 1, 1).expand(12, 1, 512)),
-        }
-        for name, (xx, dim, idx) in cases.items():
-            with self.subTest(name):
-                self.assertFalse(_is_row_broadcast_gather(xx, dim, idx))
+    def test_other_loads_untouched(self):
+        d0, d1 = sympy.symbols("d0 d1")
+        inner, handler = self._handler()
+        handler.load("y", d0 + d1)
+        # Without the index load first, the value address is left as is.
+        handler.load("x", 2048 * d0 + d1)
+        self.assertEqual(inner.loads, [("y", d0 + d1), ("x", 2048 * d0 + d1)])
 
 
 if __name__ == "__main__":
