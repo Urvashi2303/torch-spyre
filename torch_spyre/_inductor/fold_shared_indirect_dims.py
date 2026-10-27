@@ -116,6 +116,13 @@ def _plan_fold(graph: GraphLowering, op: ComputedBuffer) -> _FoldPlan | None:
     if not indirect_coeff:
         return None
 
+    # Fold only when each index step jumps whole rows of the value's last dim.
+    # A smaller step picks elements inside a row, i.e. inside a stick (#4327):
+    # folding does not make that a row gather, and its index add cannot be laid
+    # out.
+    last = concretize_expr(graph.get_buffer(value_name).get_size()[-1])
+    if indirect_coeff % last:
+        return None
     index_loop_syms = [s for s in index_dep.index.free_symbols if s in index_dep.ranges]
     shared = [s for s in index_loop_syms if value_dep.index.has(s)]
     if len(shared) != 1:
